@@ -2661,11 +2661,15 @@ Respond with ONLY valid JSON:
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing + ', photoTaken=' + photoTaken);
           
+          // DEBUG: Check what's in localStorage
+          const hasResult = localStorage.getItem('pending_scan_result');
+          const hasImage = localStorage.getItem('pending_scan_image');
+          log('localStorage check: hasResult=' + (hasResult ? 'YES(' + hasResult.length + ' chars)' : 'NO') + ', hasImage=' + (hasImage ? 'YES' : 'NO'));
+          
           // Check if we have a completed scan result to recover
-          const pendingScanResult = localStorage.getItem('pending_scan_result');
-          if (pendingScanResult && !editing) {
+          if (hasResult && !editing) {
             try {
-              const result = JSON.parse(pendingScanResult);
+              const result = JSON.parse(hasResult);
               const age = Date.now() - (result.savedAt || 0);
               log('Found pending scan RESULT from ' + Math.round(age/1000) + 's ago');
               
@@ -2692,7 +2696,10 @@ Respond with ONLY valid JSON:
                 localStorage.removeItem('pending_scan_result');
                 localStorage.removeItem('pending_scan_image');
                 localStorage.removeItem('pending_scan_time');
+                log('Result recovered and form filled!');
                 return;
+              } else {
+                log('Result too old (' + Math.round(age/1000) + 's), clearing');
               }
             } catch (e) {
               log('Error parsing scan result: ' + e.message);
@@ -2719,6 +2726,37 @@ Respond with ONLY valid JSON:
               });
               setPhotoTaken(true);
               setLastScanInfo({ success: true, message: 'Photo recovered! Tap "Read with AI" or enter details manually.' });
+              
+              // Re-check for result after 2 seconds (in case a scan was completing during reload)
+              setTimeout(() => {
+                const delayedResult = localStorage.getItem('pending_scan_result');
+                if (delayedResult) {
+                  log('Delayed check: Found result that completed during reload!');
+                  try {
+                    const result = JSON.parse(delayedResult);
+                    if (result.total) setAmount(result.total.toString());
+                    if (result.vendor) setDescription(result.vendor);
+                    if (result.category) setCategory(result.category);
+                    if (result.date) setDate(result.date);
+                    setPendingReceipt(prev => ({
+                      ...prev,
+                      vendor: result.vendor,
+                      total: result.total,
+                      items: result.items,
+                      rawText: result.rawText
+                    }));
+                    setLastScanInfo({ vendor: result.vendor, total: result.total, success: true, message: 'Auto-filled from scan!' });
+                    localStorage.removeItem('pending_scan_result');
+                    localStorage.removeItem('pending_scan_image');
+                    localStorage.removeItem('pending_scan_time');
+                    log('Delayed recovery complete: total=' + result.total);
+                  } catch (e) {
+                    log('Delayed parse error: ' + e.message);
+                  }
+                } else {
+                  log('Delayed check: No result found');
+                }
+              }, 2000);
             } else {
               log('Pending scan too old, clearing');
               localStorage.removeItem('pending_scan_image');
