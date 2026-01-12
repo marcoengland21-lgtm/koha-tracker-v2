@@ -2831,11 +2831,25 @@ Respond with ONLY the JSON object.
               const base64 = reader.result.split(',')[1];
               log('Got base64: ' + Math.round(base64.length/1024) + 'KB');
               
-              // Save to localStorage SYNCHRONOUSLY - no awaits, no promises
+              // Compress large images before saving
+              if (base64.length > 1000000) { // > 1MB
+                log('Compressing large image...');
+                compressImage(base64, 1200, 0.7).then(compressed => {
+                  log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
+                  saveAndShowForm(compressed);
+                }).catch(err => {
+                  log('Compression failed, using original: ' + err.message);
+                  saveAndShowForm(base64);
+                });
+              } else {
+                saveAndShowForm(base64);
+              }
+            };
+            
+            const saveAndShowForm = (imageData) => {
+              // Save to localStorage SYNCHRONOUSLY
               try {
-                // For large images, we may need to truncate for localStorage
-                // Most browsers support 5-10MB, base64 is ~1.3x larger than original
-                localStorage.setItem('pending_scan_image', base64);
+                localStorage.setItem('pending_scan_image', imageData);
                 localStorage.setItem('pending_scan_time', Date.now().toString());
                 log('Saved to localStorage');
               } catch (err) {
@@ -2845,7 +2859,7 @@ Respond with ONLY the JSON object.
               // Update state synchronously
               setPhotoTaken(true);
               setPendingReceipt({
-                originalImage: base64,
+                originalImage: imageData,
                 scannedAt: new Date().toISOString(),
                 vendor: '',
                 total: 0
