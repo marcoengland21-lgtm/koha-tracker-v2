@@ -1264,81 +1264,103 @@ Respond with ONLY valid JSON:
         
         console.log('--- Determining Total ---');
         
-        // Method 1: Labeled "TOTAL" (most reliable)
-        if (totalCandidates.length > 0) {
-          // Prefer the one lowest on the receipt (last total mentioned)
-          const bestTotal = totalCandidates.sort((a, b) => b.position - a.position)[0];
-          total = bestTotal.amount;
-          console.log('Method 1: Labeled total =', total);
-        }
+        // PRIORITY ORDER FOR DETERMINING TOTAL:
+        // 1. Tendered - Change (mathematically certain)
+        // 2. Labeled "TOTAL" that's NOT the tendered amount
+        // 3. Card payment amount (EFTPOS/Visa/MC)
+        // 4. Subtotal + GST
+        // 5. Largest amount in bottom half
         
-        // Method 2: Calculate from Tendered - Change
+        // Method 1: Calculate from Tendered - Change (MOST RELIABLE)
+        // If someone paid $200 cash and got $83 change, total is ALWAYS $117
         if (tenderedAmount && changeAmount) {
           const calculatedTotal = Math.round((tenderedAmount.amount - changeAmount.amount) * 100) / 100;
-          console.log('Method 2: Tendered', tenderedAmount.amount, '- Change', changeAmount.amount, '=', calculatedTotal);
+          console.log('Method 1: Tendered', tenderedAmount.amount, '- Change', changeAmount.amount, '=', calculatedTotal);
           
           if (calculatedTotal > 0) {
-            // If we have a labeled total, verify it matches
-            if (total > 0 && Math.abs(total - calculatedTotal) < 0.02) {
-              console.log('✓ Verified: Tendered - Change matches Total');
-            } else if (total > 0 && Math.abs(total - calculatedTotal) > 0.02) {
-              console.log('⚠ Mismatch! Labeled total:', total, 'Calculated:', calculatedTotal);
-              // Trust the calculated amount (Tendered - Change is more reliable)
-              total = calculatedTotal;
-            } else if (total === 0) {
-              total = calculatedTotal;
-            }
+            total = calculatedTotal;
+            tendered = tenderedAmount.amount;
+            change = changeAmount.amount;
+            console.log('✓ Using Tendered - Change =', total);
           }
+        }
+        
+        // Method 2: If we have change but no tendered, look for a "TOTAL" that makes sense
+        if (total === 0 && changeAmount && !tenderedAmount) {
+          // The total should be: some_large_amount - change
+          const possibleTendered = amounts.filter(a => 
+            a.position > 0.5 && 
+            a.amount > changeAmount.amount &&
+            !a.isChange && !a.isSubtotal && !a.isGst && !a.isDiscount
+          ).sort((a, b) => b.amount - a.amount);
           
-          tendered = tenderedAmount.amount;
-          change = changeAmount.amount;
-        }
-        
-        // Method 3: Card payment amount (for EFTPOS/Visa/MC, this IS the total)
-        if (total === 0 && cardPaymentAmount) {
-          // But only if it's not also labeled as "tendered" or has change
-          if (!tenderedAmount && !changeAmount) {
-            total = cardPaymentAmount.amount;
-            console.log('Method 3: Card payment =', total);
+          if (possibleTendered.length > 0) {
+            total = possibleTendered[0].amount - changeAmount.amount;
+            change = changeAmount.amount;
+            console.log('Method 2: Inferred total from largest - change =', total);
           }
         }
         
-        // Method 4: Subtotal + GST
+        // Method 3: Labeled "TOTAL" (but NOT if it equals a tendered amount)
+        if (total === 0 && totalCandidates.length > 0) {
+          // Sort by position (prefer later/lower on receipt)
+          const sortedTotals = totalCandidates.sort((a, b) => b.position - a.position);
+          
+          for (const candidate of sortedTotals) {
+            // Skip if this looks like the tendered amount (same as a cash/tendered line)
+            if (tenderedAmount && Math.abs(candidate.amount - tenderedAmount.amount) < 0.01) {
+              console.log('Skipping total candidate', candidate.amount, '- matches tendered amount');
+              continue;
+            }
+            total = candidate.amount;
+            console.log('Method 3: Labeled total =', total);
+            break;
+          }
+        }
+        
+        // Method 4: Card payment amount (for EFTPOS/Visa/MC, this IS the total)
+        if (total === 0 && cardPaymentAmount) {
+          if (!changeAmount) { // No change means card payment = total
+            total = cardPaymentAmount.amount;
+            console.log('Method 4: Card payment =', total);
+          }
+        }
+        
+        // Method 5: Subtotal + GST
         if (subtotalAmount) {
           subtotal = subtotalAmount.amount;
           if (gstAmount) {
             gst = gstAmount.amount;
-            const calculatedTotal = subtotal + gst;
-            console.log('Method 4: Subtotal', subtotal, '+ GST', gst, '=', calculatedTotal);
+            const calculatedTotal = Math.round((subtotal + gst) * 100) / 100;
+            console.log('Method 5: Subtotal', subtotal, '+ GST', gst, '=', calculatedTotal);
             
             if (total === 0) {
               total = calculatedTotal;
-            } else if (Math.abs(total - calculatedTotal) > 1) {
-              console.log('⚠ Subtotal + GST doesn\'t match total');
+            } else if (Math.abs(total - calculatedTotal) < 1) {
+              console.log('✓ Subtotal + GST matches total');
             }
           }
         }
         
-        // Method 5: Largest amount in bottom half (last resort)
+        // Method 6: Largest amount in bottom half (last resort)
         if (total === 0) {
           const bottomAmounts = amounts
-            .filter(a => a.position > 0.4 && !a.isDiscount && !a.isChange && !a.isRounding && !a.isCashOut)
+            .filter(a => a.position > 0.4 && !a.isDiscount && !a.isChange && !a.isRounding && !a.isCashOut && !a.isTendered && !a.isCashPaid)
             .sort((a, b) => b.amount - a.amount);
           
           if (bottomAmounts.length > 0) {
-            // But exclude if it looks like tendered amount (larger than others suggest)
             const candidate = bottomAmounts[0];
             
-            // If there's a change amount, this might be tendered not total
-            if (changeAmount && candidate.amount > changeAmount.amount * 2) {
-              // Calculate total from this - change
+            // If there's change, this might be tendered not total
+            if (changeAmount && candidate.amount > changeAmount.amount) {
               total = candidate.amount - changeAmount.amount;
-              console.log('Method 5: Guessed tendered - change =', total);
+              console.log('Method 6: Guessed tendered - change =', total);
             } else {
               total = candidate.amount;
-              console.log('Method 5: Largest bottom amount =', total);
+              console.log('Method 6: Largest bottom amount =', total);
             }
           }
+        }
         }
         
         // =====================
@@ -1379,11 +1401,11 @@ Respond with ONLY valid JSON:
         if (gstAmount && !gst) gst = gstAmount.amount;
         
         // =====================
-        // STEP 5: FIND VENDOR
+        // STEP 5: FIND VENDOR AND CATEGORY
         // =====================
         
         const nzStores = {
-          // Supermarkets
+          // SUPERMARKETS -> kai
           'countdown': { name: 'Countdown', category: 'kai' },
           'woolworths': { name: 'Countdown', category: 'kai' },
           'pak n save': { name: 'Pak n Save', category: 'kai' },
@@ -1391,10 +1413,20 @@ Respond with ONLY valid JSON:
           'paknsave': { name: 'Pak n Save', category: 'kai' },
           'new world': { name: 'New World', category: 'kai' },
           'fresh choice': { name: 'Fresh Choice', category: 'kai' },
+          'freshchoice': { name: 'Fresh Choice', category: 'kai' },
           'four square': { name: 'Four Square', category: 'kai' },
+          'foursquare': { name: 'Four Square', category: 'kai' },
           'supervalue': { name: 'SuperValue', category: 'kai' },
+          'super value': { name: 'SuperValue', category: 'kai' },
           'night n day': { name: 'Night n Day', category: 'kai' },
-          // Fast food
+          'night \'n day': { name: 'Night n Day', category: 'kai' },
+          'dairy': { name: 'Dairy', category: 'kai' },
+          'bin inn': { name: 'Bin Inn', category: 'kai' },
+          'moore wilson': { name: 'Moore Wilsons', category: 'kai' },
+          'farro': { name: 'Farro', category: 'kai' },
+          'commonsense': { name: 'Commonsense', category: 'kai' },
+          
+          // FAST FOOD & RESTAURANTS -> catering
           'kfc': { name: 'KFC', category: 'catering' },
           'kentucky fried': { name: 'KFC', category: 'catering' },
           'mcdonald': { name: 'McDonalds', category: 'catering' },
@@ -1408,15 +1440,48 @@ Respond with ONLY valid JSON:
           'starbucks': { name: 'Starbucks', category: 'catering' },
           'nando': { name: 'Nandos', category: 'catering' },
           'carl\'s jr': { name: 'Carls Jr', category: 'catering' },
-          'tank': { name: 'Tank', category: 'catering' },
-          // Liquor
+          'tank juice': { name: 'Tank', category: 'catering' },
+          'mexico': { name: 'Mexico', category: 'catering' },
+          'taco bell': { name: 'Taco Bell', category: 'catering' },
+          'pita pit': { name: 'Pita Pit', category: 'catering' },
+          
+          // FOOD DELIVERY -> catering
+          'uber eats': { name: 'Uber Eats', category: 'catering' },
+          'ubereats': { name: 'Uber Eats', category: 'catering' },
+          'doordash': { name: 'DoorDash', category: 'catering' },
+          'door dash': { name: 'DoorDash', category: 'catering' },
+          'menulog': { name: 'Menulog', category: 'catering' },
+          'delivereasy': { name: 'Deliver Easy', category: 'catering' },
+          'deliver easy': { name: 'Deliver Easy', category: 'catering' },
+          
+          // CAFES & BAKERIES -> catering
+          'cafe': { name: 'Cafe', category: 'catering' },
+          'café': { name: 'Cafe', category: 'catering' },
+          'coffee': { name: 'Coffee', category: 'catering' },
+          'espresso': { name: 'Espresso', category: 'catering' },
+          'bakery': { name: 'Bakery', category: 'catering' },
+          'bakehouse': { name: 'Bakehouse', category: 'catering' },
+          'muffin break': { name: 'Muffin Break', category: 'catering' },
+          'robert harris': { name: 'Robert Harris', category: 'catering' },
+          'columbus coffee': { name: 'Columbus Coffee', category: 'catering' },
+          'coffee club': { name: 'Coffee Club', category: 'catering' },
+          'esquires': { name: 'Esquires', category: 'catering' },
+          
+          // LIQUOR -> drinks
           'super liquor': { name: 'Super Liquor', category: 'drinks' },
           'liquorland': { name: 'Liquorland', category: 'drinks' },
           'liquor king': { name: 'Liquor King', category: 'drinks' },
           'henry\'s': { name: 'Henrys', category: 'drinks' },
           'big barrel': { name: 'Big Barrel', category: 'drinks' },
-          // Petrol
+          'bottle-o': { name: 'Bottle-O', category: 'drinks' },
+          'black bull': { name: 'Black Bull', category: 'drinks' },
+          'wine': { name: 'Wine Store', category: 'drinks' },
+          'beer': { name: 'Beer Store', category: 'drinks' },
+          'spirits': { name: 'Spirits', category: 'drinks' },
+          
+          // PETROL -> petrol
           'z energy': { name: 'Z Energy', category: 'petrol' },
+          'z station': { name: 'Z Energy', category: 'petrol' },
           'bp connect': { name: 'BP', category: 'petrol' },
           'bp ': { name: 'BP', category: 'petrol' },
           'mobil': { name: 'Mobil', category: 'petrol' },
@@ -1426,31 +1491,94 @@ Respond with ONLY valid JSON:
           'waitomo': { name: 'Waitomo', category: 'petrol' },
           'allied': { name: 'Allied', category: 'petrol' },
           'challenge': { name: 'Challenge', category: 'petrol' },
-          // Retail
+          'fuel': { name: 'Fuel', category: 'petrol' },
+          'petrol': { name: 'Petrol', category: 'petrol' },
+          'gasoline': { name: 'Petrol', category: 'petrol' },
+          
+          // CLOTHING -> clothing
           'kmart': { name: 'Kmart', category: 'clothing' },
           'farmers': { name: 'Farmers', category: 'clothing' },
           'the warehouse': { name: 'The Warehouse', category: 'clothing' },
+          'postie': { name: 'Postie', category: 'clothing' },
+          'cotton on': { name: 'Cotton On', category: 'clothing' },
+          'glassons': { name: 'Glassons', category: 'clothing' },
+          'hallensteins': { name: 'Hallensteins', category: 'clothing' },
+          'h&m': { name: 'H&M', category: 'clothing' },
+          'zara': { name: 'Zara', category: 'clothing' },
+          'stirling sports': { name: 'Stirling Sports', category: 'clothing' },
+          'rebel sport': { name: 'Rebel Sport', category: 'clothing' },
+          
+          // PRINTING -> printing
           'warehouse stationery': { name: 'Warehouse Stationery', category: 'printing' },
           'whitcoulls': { name: 'Whitcoulls', category: 'printing' },
           'paper plus': { name: 'Paper Plus', category: 'printing' },
+          'office max': { name: 'OfficeMax', category: 'printing' },
+          'officemax': { name: 'OfficeMax', category: 'printing' },
+          'print': { name: 'Print Shop', category: 'printing' },
+          'copy': { name: 'Copy Shop', category: 'printing' },
+          
+          // HARDWARE -> misc
           'mitre 10': { name: 'Mitre 10', category: 'misc' },
+          'mitre10': { name: 'Mitre 10', category: 'misc' },
           'bunnings': { name: 'Bunnings', category: 'misc' },
+          'placemakers': { name: 'PlaceMakers', category: 'misc' },
+          
+          // ELECTRONICS/RETAIL -> misc  
           'briscoes': { name: 'Briscoes', category: 'misc' },
           'jb hi-fi': { name: 'JB Hi-Fi', category: 'misc' },
           'noel leeming': { name: 'Noel Leeming', category: 'misc' },
           'harvey norman': { name: 'Harvey Norman', category: 'misc' },
-          // Flowers
+          'pbtech': { name: 'PB Tech', category: 'misc' },
+          'pb tech': { name: 'PB Tech', category: 'misc' },
+          
+          // FLOWERS -> flowers
           'florist': { name: 'Florist', category: 'flowers' },
           'interflora': { name: 'Interflora', category: 'flowers' },
           'bloom': { name: 'Bloom', category: 'flowers' },
-          // Funeral
+          'flower': { name: 'Flower Shop', category: 'flowers' },
+          'floral': { name: 'Floral', category: 'flowers' },
+          'rose': { name: 'Rose Shop', category: 'flowers' },
+          'bouquet': { name: 'Bouquet', category: 'flowers' },
+          
+          // FUNERAL -> funeral_home
           'funeral': { name: 'Funeral Services', category: 'funeral_home' },
           'mortuary': { name: 'Mortuary', category: 'funeral_home' },
           'guardian funeral': { name: 'Guardian Funerals', category: 'funeral_home' },
-          'simplicity': { name: 'Simplicity Funerals', category: 'funeral_home' },
+          'simplicity funeral': { name: 'Simplicity Funerals', category: 'funeral_home' },
+          'lychgate': { name: 'Lychgate', category: 'funeral_home' },
+          'davis funeral': { name: 'Davis Funerals', category: 'funeral_home' },
+          'griefcare': { name: 'Griefcare', category: 'funeral_home' },
+          
+          // ACCOMMODATION -> accommodation
+          'motel': { name: 'Motel', category: 'accommodation' },
+          'hotel': { name: 'Hotel', category: 'accommodation' },
+          'airbnb': { name: 'Airbnb', category: 'accommodation' },
+          'booking.com': { name: 'Booking.com', category: 'accommodation' },
+          'holiday inn': { name: 'Holiday Inn', category: 'accommodation' },
+          'ibis': { name: 'Ibis', category: 'accommodation' },
+          'quest': { name: 'Quest', category: 'accommodation' },
+          'accommodation': { name: 'Accommodation', category: 'accommodation' },
+          'lodge': { name: 'Lodge', category: 'accommodation' },
+          
+          // TRAVEL -> travel
+          'air new zealand': { name: 'Air New Zealand', category: 'travel' },
+          'airnz': { name: 'Air New Zealand', category: 'travel' },
+          'jetstar': { name: 'Jetstar', category: 'travel' },
+          'qantas': { name: 'Qantas', category: 'travel' },
+          'interislander': { name: 'Interislander', category: 'travel' },
+          'bluebridge': { name: 'Bluebridge', category: 'travel' },
+          'intercity': { name: 'Intercity', category: 'travel' },
+          'naked bus': { name: 'Naked Bus', category: 'travel' },
+          'taxi': { name: 'Taxi', category: 'travel' },
+          'uber': { name: 'Uber', category: 'travel' },
+          'ola': { name: 'Ola', category: 'travel' },
+          'zoomy': { name: 'Zoomy', category: 'travel' },
         };
         
         const headerText = lines.slice(0, 10).join(' ').toLowerCase();
+        const fullText = lines.join(' ').toLowerCase();
+        
+        // First check known stores
         for (const [pattern, info] of Object.entries(nzStores)) {
           if (headerText.includes(pattern)) {
             vendor = info.name;
@@ -1459,7 +1587,59 @@ Respond with ONLY valid JSON:
           }
         }
         
-        // If no known store, find first meaningful line
+        // If no match in header, check full text for key terms
+        if (category === 'misc' && !vendor) {
+          for (const [pattern, info] of Object.entries(nzStores)) {
+            if (fullText.includes(pattern)) {
+              if (!vendor) vendor = info.name;
+              category = info.category;
+              break;
+            }
+          }
+        }
+        
+        // CONTENT-BASED CATEGORY DETECTION
+        // If still misc, look for hints in the receipt content
+        if (category === 'misc') {
+          // Food/Restaurant hints
+          if (/\b(burger|pizza|chicken|fries|chips|meal|combo|drink|coffee|tea|latte|cappuccino|flat white|muffin|sandwich|salad|soup|breakfast|lunch|dinner|takeaway|dine.?in|order|kitchen|chef|menu|food)\b/i.test(fullText)) {
+            category = 'catering';
+          }
+          // Grocery hints
+          else if (/\b(groceries|produce|fruit|vegetable|meat|dairy|bread|milk|eggs|cheese|frozen|pantry|household)\b/i.test(fullText)) {
+            category = 'kai';
+          }
+          // Alcohol hints
+          else if (/\b(wine|beer|vodka|whisky|rum|gin|liqueur|cider|rtd|spirit|alcohol|bottle)\b/i.test(fullText)) {
+            category = 'drinks';
+          }
+          // Petrol hints
+          else if (/\b(petrol|diesel|fuel|litre|pump|91|95|98|unleaded)\b/i.test(fullText)) {
+            category = 'petrol';
+          }
+          // Flower hints
+          else if (/\b(flower|floral|bouquet|rose|lily|arrangement|vase|plant|wreath)\b/i.test(fullText)) {
+            category = 'flowers';
+          }
+          // Accommodation hints
+          else if (/\b(room|night|check.?in|check.?out|guest|booking|reservation|stay|bed)\b/i.test(fullText)) {
+            category = 'accommodation';
+          }
+          // Travel hints
+          else if (/\b(flight|boarding|seat|passenger|ticket|fare|journey|trip|travel|airline)\b/i.test(fullText)) {
+            category = 'travel';
+          }
+          // Clothing hints
+          else if (/\b(shirt|pants|dress|shoes|jacket|size|clothing|apparel|wear|fashion)\b/i.test(fullText)) {
+            category = 'clothing';
+          }
+          // Printing hints
+          else if (/\b(print|copy|paper|laminate|binding|document|photo|poster)\b/i.test(fullText)) {
+            category = 'printing';
+          }
+        }
+        
+        // If no known store, find first meaningful line for vendor name
         if (!vendor) {
           const skipPatterns = [
             /^\s*$/, /^[\d\s\-\.\:\/]+$/, /^tax\s*inv/i, /^invoice/i, /^receipt/i,
@@ -3887,125 +4067,6 @@ Respond with ONLY valid JSON:
               <div className="mb-6">
                 <label className="text-slate-400 text-sm mb-2 block">Date</label>
                 <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white" />
-              </div>
-              
-              {/* Receipt Details - Collapsible */}
-              <div className="mb-6">
-                <button 
-                  type="button"
-                  onClick={() => setShowReceiptDetails(!showReceiptDetails)}
-                  className="w-full flex items-center justify-between text-slate-400 text-sm py-2"
-                >
-                  <span className="flex items-center gap-2">
-                    <span>🧾</span>
-                    <span>Receipt Details</span>
-                    {(subtotal || gst || discount || paymentMethod) && (
-                      <span className="text-xs bg-cyan-600/30 text-cyan-400 px-2 py-0.5 rounded-full">AI filled</span>
-                    )}
-                  </span>
-                  <span className={`transition-transform ${showReceiptDetails ? 'rotate-180' : ''}`}>▼</span>
-                </button>
-                
-                {showReceiptDetails && (
-                  <div className="mt-3 space-y-3 bg-slate-900/50 rounded-xl p-4 border border-slate-800">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-slate-500 text-xs mb-1 block">Subtotal</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
-                          <input 
-                            type="number" 
-                            value={subtotal} 
-                            onChange={(e) => setSubtotal(e.target.value)} 
-                            placeholder="0.00" 
-                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="text-slate-500 text-xs mb-1 block">GST (15%)</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
-                          <input 
-                            type="number" 
-                            value={gst} 
-                            onChange={(e) => setGst(e.target.value)} 
-                            placeholder="0.00" 
-                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-slate-500 text-xs mb-1 block">Discount/Savings</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
-                          <input 
-                            type="number" 
-                            value={discount} 
-                            onChange={(e) => setDiscount(e.target.value)} 
-                            placeholder="0.00" 
-                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-green-400 text-sm placeholder-slate-600" 
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="text-slate-500 text-xs mb-1 block">Cash Out</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
-                          <input 
-                            type="number" 
-                            value={cashOut} 
-                            onChange={(e) => setCashOut(e.target.value)} 
-                            placeholder="0.00" 
-                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-slate-500 text-xs mb-1 block">Change Given</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
-                          <input 
-                            type="number" 
-                            value={change} 
-                            onChange={(e) => setChange(e.target.value)} 
-                            placeholder="0.00" 
-                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="text-slate-500 text-xs mb-1 block">Payment Method</label>
-                        <select 
-                          value={paymentMethod} 
-                          onChange={(e) => setPaymentMethod(e.target.value)}
-                          className="w-full bg-slate-800 rounded-lg px-3 py-2 text-white text-sm"
-                        >
-                          <option value="">Unknown</option>
-                          <option value="Cash">Cash</option>
-                          <option value="EFTPOS">EFTPOS</option>
-                          <option value="Visa">Visa</option>
-                          <option value="Mastercard">Mastercard</option>
-                          <option value="Paywave">Paywave</option>
-                          <option value="Debit Card">Debit Card</option>
-                          <option value="Credit Card">Credit Card</option>
-                        </select>
-                      </div>
-                    </div>
-                    
-                    {cardLastFour && (
-                      <div className="text-center text-slate-500 text-xs">
-                        Card ending in •••• {cardLastFour}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
               
               <button onClick={handleSubmit} disabled={!amount || !category} className="w-full py-4 bg-gradient-to-r from-orange-600 to-red-600 rounded-xl font-bold text-lg disabled:opacity-50">{editing ? "Save" : "Add"}</button>
