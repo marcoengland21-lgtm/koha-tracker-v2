@@ -1101,35 +1101,36 @@ Respond with ONLY valid JSON:
       };
       
       // Parse receipt text to extract structured data
-      // NZ RECEIPT STRUCTURE (thermal paper):
+      // Handles NZ receipts AND invoices
+      // 
+      // RECEIPT STRUCTURE:
       // ┌─────────────────────────┐
-      // │   STORE NAME (big)      │  <- Lines 1-3
-      // │   Address, Phone        │  <- Lines 2-5
-      // │   GST#, Date/Time       │  <- Near top or bottom
+      // │   STORE NAME            │
+      // │   Address, Phone        │
       // ├─────────────────────────┤
-      // │   Item 1        $X.XX   │  <- Middle section
+      // │   Item 1        $X.XX   │
       // │   Item 2        $X.XX   │
-      // │   ...                   │
       // ├─────────────────────────┤
-      // │   SUBTOTAL      $XX.XX  │  <- Near bottom
-      // │   GST (15%)     $X.XX   │  <- 15% in NZ
-      // │   TOTAL         $XX.XX  │  <- THE KEY NUMBER
-      // │   EFTPOS        $XX.XX  │  <- Payment confirmation
-      // │   Card: ****1234        │
-      // │   Date Time             │
+      // │   SUBTOTAL      $XX.XX  │  <- Before tax
+      // │   GST (15%)     $X.XX   │  <- NZ tax
+      // │   TOTAL         $XX.XX  │  <- WHAT YOU OWE ✓
+      // │   CASH          $XX.XX  │  <- What customer gave
+      // │   CHANGE        $X.XX   │  <- What customer got back
       // └─────────────────────────┘
+      //
+      // KEY INSIGHT: Total ≠ Paid
+      // - TOTAL/AMOUNT DUE = what you owe (this is what we want!)
+      // - CASH/TENDERED/PAID = what customer gave (might be more)
+      // - CHANGE = what customer got back
+      // - Verify: Paid - Change = Total
       
       const parseReceiptText = (text) => {
-        // Clean and normalize text
-        const cleanText = text
-          .replace(/[|]/g, 'I')
-          .replace(/[oO](?=\d)/g, '0')
-          .replace(/(?<=\d)[oO]/g, '0')
-          .replace(/\$/g, ' $ ')
-          .replace(/\s+/g, ' ');
-        
         const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
         const allText = lines.join(' ').toLowerCase();
+        
+        console.log('=== PARSING RECEIPT ===');
+        console.log('Lines:', lines.length);
+        console.log('Preview:', lines.slice(0, 5).join(' | '));
         
         let total = 0;
         let subtotal = 0;
@@ -1137,6 +1138,7 @@ Respond with ONLY valid JSON:
         let discount = 0;
         let cashOut = 0;
         let change = 0;
+        let tendered = 0; // What customer paid (not the total!)
         let vendor = '';
         let date = null;
         let time = null;
@@ -1144,190 +1146,279 @@ Respond with ONLY valid JSON:
         let paymentMethod = '';
         let cardLastFour = '';
         const items = [];
-        const allAmounts = [];
+        const amounts = [];
         
         // =====================
-        // STEP 1: EXTRACT ALL DOLLAR AMOUNTS WITH CONTEXT
+        // STEP 1: EXTRACT ALL AMOUNTS WITH CONTEXT
         // =====================
-        // Find every dollar amount and what words are near it
         
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
           const lineLower = line.toLowerCase();
+          const position = i / lines.length; // 0 = top, 1 = bottom
           
-          // Find all amounts in this line: $XX.XX or XX.XX
-          const amountRegex = /\$?\s*(\d{1,5})[.,](\d{2})\b/g;
+          // Find amounts: $XX.XX or XX.XX
+          const regex = /\$?\s*(\d{1,5})[.,](\d{2})\b/g;
           let match;
           
-          while ((match = amountRegex.exec(line)) !== null) {
+          while ((match = regex.exec(line)) !== null) {
             const amount = parseFloat(match[1] + '.' + match[2]);
-            if (amount > 0 && amount < 100000) {
-              allAmounts.push({
-                amount,
-                line: i,
-                lineText: lineLower,
-                position: i / lines.length, // 0 = top, 1 = bottom
-                // Classify what type of amount this might be
-                isTotal: /\btotal\b/.test(lineLower) && !/sub.?total/i.test(lineLower),
-                isSubtotal: /sub.?total/i.test(lineLower),
-                isGst: /\bgst\b/i.test(lineLower) && !/gst\s*(no|num|#|reg)/i.test(lineLower),
-                isTax: /\btax\b/i.test(lineLower) && !/tax\s*(no|inv)/i.test(lineLower),
-                isEftpos: /eftpos|paid|tender|payment/i.test(lineLower),
-                isChange: /\bchange\b/i.test(lineLower),
-                isDiscount: /discount|savings?|less|off|promo/i.test(lineLower),
-                isCashOut: /cash\s*out/i.test(lineLower),
-                isRounding: /round/i.test(lineLower),
-                isVisa: /visa/i.test(lineLower),
-                isMastercard: /master/i.test(lineLower),
-                isDebit: /debit/i.test(lineLower),
-                isCredit: /credit/i.test(lineLower)
-              });
+            if (amount <= 0 || amount >= 100000) continue;
+            
+            // Classify this amount based on keywords in the line
+            const info = {
+              amount,
+              line: i,
+              position,
+              text: lineLower,
+              
+              // TOTAL keywords (what you actually owe)
+              isTotal: /\btotal\b/i.test(lineLower) && 
+                       !/sub.?total|cash.?total|tendered|paid|change|rounding/i.test(lineLower),
+              isAmountDue: /amount\s*(due|owing)|balance\s*(due|owing)|to\s*pay|you\s*owe/i.test(lineLower),
+              isGrandTotal: /grand\s*total/i.test(lineLower),
+              isSaleTotal: /sale\s*total/i.test(lineLower),
+              
+              // SUBTOTAL (before tax)
+              isSubtotal: /sub.?total/i.test(lineLower),
+              
+              // TAX
+              isGst: /\bgst\b/i.test(lineLower) && !/gst\s*(no|num|#|reg|inc)/i.test(lineLower),
+              isTax: /\btax\b/i.test(lineLower) && !/tax\s*(no|inv|inc)/i.test(lineLower),
+              
+              // TENDERED (what customer gave - NOT the total!)
+              isTendered: /tender|tendered/i.test(lineLower),
+              isCashPaid: /\bcash\b/i.test(lineLower) && !/cash\s*out|cash\s*back/i.test(lineLower) && position > 0.5,
+              isPaid: /\bpaid\b/i.test(lineLower) && position > 0.6,
+              
+              // CHANGE (customer got back)
+              isChange: /\bchange\b/i.test(lineLower) && !/no\s*change/i.test(lineLower),
+              
+              // EFTPOS/Card (usually = total for card payments)
+              isEftpos: /eftpos/i.test(lineLower),
+              isVisa: /\bvisa\b/i.test(lineLower),
+              isMastercard: /master/i.test(lineLower),
+              isCard: /\bcard\b/i.test(lineLower) && /\$|\.00|\.[\d]{2}/.test(line),
+              
+              // Other
+              isDiscount: /discount|saving|less|off|promo/i.test(lineLower),
+              isCashOut: /cash\s*(out|back)/i.test(lineLower),
+              isRounding: /round/i.test(lineLower),
+              
+              // Invoice-specific
+              isInvoiceTotal: /invoice\s*total|total\s*(amount|due|payable)/i.test(lineLower),
+              isBalanceDue: /balance\s*(due|owing|payable)/i.test(lineLower),
+            };
+            
+            amounts.push(info);
+          }
+        }
+        
+        console.log('Found', amounts.length, 'amounts:');
+        amounts.forEach(a => {
+          const flags = Object.entries(a)
+            .filter(([k, v]) => v === true && k.startsWith('is'))
+            .map(([k]) => k.replace('is', ''));
+          if (flags.length > 0) {
+            console.log('  $' + a.amount.toFixed(2), '@', (a.position * 100).toFixed(0) + '%', '-', flags.join(', '));
+          }
+        });
+        
+        // =====================
+        // STEP 2: IDENTIFY KEY AMOUNTS (PRIORITY ORDER)
+        // =====================
+        
+        // Find the TRUE TOTAL (what you owe)
+        // Priority: Grand Total > Total (not sub) > Invoice Total > Amount Due > Balance Due
+        const totalCandidates = amounts.filter(a => 
+          a.isGrandTotal || a.isTotal || a.isSaleTotal || 
+          a.isInvoiceTotal || a.isAmountDue || a.isBalanceDue
+        );
+        
+        // For card payments, EFTPOS amount usually IS the total
+        const cardPaymentAmount = amounts.find(a => 
+          (a.isEftpos || a.isVisa || a.isMastercard) && a.position > 0.5
+        );
+        
+        // Find tendered amount (what customer gave)
+        const tenderedAmount = amounts.find(a => a.isTendered || a.isCashPaid);
+        
+        // Find change amount
+        const changeAmount = amounts.find(a => a.isChange);
+        
+        // Find subtotal
+        const subtotalAmount = amounts.find(a => a.isSubtotal);
+        
+        // Find GST
+        const gstAmount = amounts.find(a => (a.isGst || a.isTax) && a.amount < 5000);
+        
+        // Find discount
+        const discountAmount = amounts.find(a => a.isDiscount);
+        
+        // Find cash out
+        const cashOutAmount = amounts.find(a => a.isCashOut);
+        
+        // =====================
+        // STEP 3: DETERMINE THE ACTUAL TOTAL
+        // =====================
+        
+        console.log('--- Determining Total ---');
+        
+        // Method 1: Labeled "TOTAL" (most reliable)
+        if (totalCandidates.length > 0) {
+          // Prefer the one lowest on the receipt (last total mentioned)
+          const bestTotal = totalCandidates.sort((a, b) => b.position - a.position)[0];
+          total = bestTotal.amount;
+          console.log('Method 1: Labeled total =', total);
+        }
+        
+        // Method 2: Calculate from Tendered - Change
+        if (tenderedAmount && changeAmount) {
+          const calculatedTotal = Math.round((tenderedAmount.amount - changeAmount.amount) * 100) / 100;
+          console.log('Method 2: Tendered', tenderedAmount.amount, '- Change', changeAmount.amount, '=', calculatedTotal);
+          
+          if (calculatedTotal > 0) {
+            // If we have a labeled total, verify it matches
+            if (total > 0 && Math.abs(total - calculatedTotal) < 0.02) {
+              console.log('✓ Verified: Tendered - Change matches Total');
+            } else if (total > 0 && Math.abs(total - calculatedTotal) > 0.02) {
+              console.log('⚠ Mismatch! Labeled total:', total, 'Calculated:', calculatedTotal);
+              // Trust the calculated amount (Tendered - Change is more reliable)
+              total = calculatedTotal;
+            } else if (total === 0) {
+              total = calculatedTotal;
+            }
+          }
+          
+          tendered = tenderedAmount.amount;
+          change = changeAmount.amount;
+        }
+        
+        // Method 3: Card payment amount (for EFTPOS/Visa/MC, this IS the total)
+        if (total === 0 && cardPaymentAmount) {
+          // But only if it's not also labeled as "tendered" or has change
+          if (!tenderedAmount && !changeAmount) {
+            total = cardPaymentAmount.amount;
+            console.log('Method 3: Card payment =', total);
+          }
+        }
+        
+        // Method 4: Subtotal + GST
+        if (subtotalAmount) {
+          subtotal = subtotalAmount.amount;
+          if (gstAmount) {
+            gst = gstAmount.amount;
+            const calculatedTotal = subtotal + gst;
+            console.log('Method 4: Subtotal', subtotal, '+ GST', gst, '=', calculatedTotal);
+            
+            if (total === 0) {
+              total = calculatedTotal;
+            } else if (Math.abs(total - calculatedTotal) > 1) {
+              console.log('⚠ Subtotal + GST doesn\'t match total');
             }
           }
         }
         
-        console.log('Found amounts:', allAmounts.map(a => ({ amt: a.amount, pos: a.position.toFixed(2), flags: Object.entries(a).filter(([k,v]) => v === true && k.startsWith('is')).map(([k]) => k) })));
-        
-        // =====================
-        // STEP 2: IDENTIFY KEY AMOUNTS
-        // =====================
-        
-        // Find labeled amounts first (most reliable)
-        const labeledTotal = allAmounts.find(a => a.isTotal && a.position > 0.4);
-        const labeledSubtotal = allAmounts.find(a => a.isSubtotal);
-        const labeledGst = allAmounts.find(a => (a.isGst || a.isTax) && a.amount < 1000);
-        const labeledEftpos = allAmounts.find(a => a.isEftpos && a.position > 0.5);
-        const labeledDiscount = allAmounts.find(a => a.isDiscount);
-        const labeledCashOut = allAmounts.find(a => a.isCashOut);
-        const labeledChange = allAmounts.find(a => a.isChange);
-        
-        // Set values from labeled amounts
-        if (labeledSubtotal) subtotal = labeledSubtotal.amount;
-        if (labeledGst) gst = labeledGst.amount;
-        if (labeledDiscount) discount = labeledDiscount.amount;
-        if (labeledCashOut) cashOut = labeledCashOut.amount;
-        if (labeledChange) change = labeledChange.amount;
-        
-        // Determine TOTAL - this is the critical one
-        if (labeledTotal) {
-          total = labeledTotal.amount;
-        } else if (labeledEftpos) {
-          // EFTPOS amount is usually the total paid
-          total = labeledEftpos.amount;
+        // Method 5: Largest amount in bottom half (last resort)
+        if (total === 0) {
+          const bottomAmounts = amounts
+            .filter(a => a.position > 0.4 && !a.isDiscount && !a.isChange && !a.isRounding && !a.isCashOut)
+            .sort((a, b) => b.amount - a.amount);
+          
+          if (bottomAmounts.length > 0) {
+            // But exclude if it looks like tendered amount (larger than others suggest)
+            const candidate = bottomAmounts[0];
+            
+            // If there's a change amount, this might be tendered not total
+            if (changeAmount && candidate.amount > changeAmount.amount * 2) {
+              // Calculate total from this - change
+              total = candidate.amount - changeAmount.amount;
+              console.log('Method 5: Guessed tendered - change =', total);
+            } else {
+              total = candidate.amount;
+              console.log('Method 5: Largest bottom amount =', total);
+            }
+          }
         }
         
         // =====================
-        // STEP 3: VERIFY & CROSS-CHECK (NZ GST is 15%)
+        // STEP 4: VERIFY WITH NZ GST MATH
         // =====================
         
-        // In NZ: Total = Subtotal + GST, and GST = Total × 3/23 (≈ 13.04% of total)
-        // Or GST = Subtotal × 0.15
+        // NZ GST is 15%, so:
+        // - Total = Subtotal × 1.15
+        // - GST = Total × 3/23 ≈ Total × 0.1304
+        // - Subtotal = Total / 1.15 ≈ Total × 0.8696
         
-        if (subtotal > 0 && gst > 0 && total === 0) {
-          // Calculate total from subtotal + GST
-          total = subtotal + gst;
-          console.log('Calculated total from subtotal + GST:', total);
-        }
-        
-        if (subtotal > 0 && total > 0 && gst === 0) {
-          // Calculate GST from total - subtotal
-          gst = Math.round((total - subtotal) * 100) / 100;
-          console.log('Calculated GST from total - subtotal:', gst);
-        }
-        
-        if (total > 0 && subtotal === 0 && gst === 0) {
-          // Estimate subtotal and GST from total (NZ 15% GST)
-          // Total = Subtotal × 1.15, so Subtotal = Total / 1.15
-          subtotal = Math.round((total / 1.15) * 100) / 100;
-          gst = Math.round((total - subtotal) * 100) / 100;
-          console.log('Estimated subtotal and GST from total');
-        }
-        
-        // Sanity checks
         if (total > 0) {
-          // GST should be roughly 13-14% of total (15% of subtotal = 13.04% of total)
-          const expectedGstFromTotal = total * 3 / 23;
-          if (gst > 0 && Math.abs(gst - expectedGstFromTotal) > expectedGstFromTotal * 0.5) {
-            console.log('Warning: GST seems off. Expected ~' + expectedGstFromTotal.toFixed(2) + ', got ' + gst);
+          // Estimate GST if not found
+          if (!gst && !subtotal) {
+            subtotal = Math.round((total / 1.15) * 100) / 100;
+            gst = Math.round((total - subtotal) * 100) / 100;
+            console.log('Estimated: Subtotal', subtotal, 'GST', gst);
           }
           
-          // Subtotal should be less than total
-          if (subtotal > total) {
-            console.log('Warning: Subtotal > Total, swapping');
+          // Verify GST is reasonable (should be ~13% of total)
+          if (gst > 0) {
+            const expectedGst = total * 3 / 23;
+            if (Math.abs(gst - expectedGst) > expectedGst * 0.3) {
+              console.log('⚠ GST seems off. Expected ~$' + expectedGst.toFixed(2) + ', got $' + gst.toFixed(2));
+            }
+          }
+          
+          // Sanity check: subtotal should be less than total
+          if (subtotal > 0 && subtotal > total) {
+            console.log('⚠ Subtotal > Total, swapping');
             [subtotal, total] = [total, subtotal];
           }
         }
         
-        // If still no total, find largest amount in bottom half
-        if (total === 0) {
-          const bottomAmounts = allAmounts
-            .filter(a => a.position > 0.4 && !a.isDiscount && !a.isChange && !a.isRounding)
-            .sort((a, b) => b.amount - a.amount);
-          
-          if (bottomAmounts.length > 0) {
-            total = bottomAmounts[0].amount;
-            console.log('Using largest bottom amount as total:', total);
-          }
-        }
-        
-        // If STILL no total, use largest amount overall
-        if (total === 0 && allAmounts.length > 0) {
-          const sorted = [...allAmounts].sort((a, b) => b.amount - a.amount);
-          total = sorted[0].amount;
-          console.log('Using largest amount as total:', total);
-        }
+        // Set other values
+        if (discountAmount) discount = discountAmount.amount;
+        if (cashOutAmount) cashOut = cashOutAmount.amount;
+        if (gstAmount && !gst) gst = gstAmount.amount;
         
         // =====================
-        // STEP 4: FIND VENDOR (NZ STORES)
+        // STEP 5: FIND VENDOR
         // =====================
         
         const nzStores = {
           // Supermarkets
           'countdown': { name: 'Countdown', category: 'kai' },
-          'woolworths': { name: 'Countdown', category: 'kai' }, // Countdown was Woolworths
+          'woolworths': { name: 'Countdown', category: 'kai' },
           'pak n save': { name: 'Pak n Save', category: 'kai' },
           'pak\'n save': { name: 'Pak n Save', category: 'kai' },
           'paknsave': { name: 'Pak n Save', category: 'kai' },
           'new world': { name: 'New World', category: 'kai' },
           'fresh choice': { name: 'Fresh Choice', category: 'kai' },
-          'freshchoice': { name: 'Fresh Choice', category: 'kai' },
           'four square': { name: 'Four Square', category: 'kai' },
-          'foursquare': { name: 'Four Square', category: 'kai' },
           'supervalue': { name: 'SuperValue', category: 'kai' },
-          'super value': { name: 'SuperValue', category: 'kai' },
           'night n day': { name: 'Night n Day', category: 'kai' },
-          'night \'n day': { name: 'Night n Day', category: 'kai' },
-          'dairy': { name: 'Dairy', category: 'kai' },
           // Fast food
           'kfc': { name: 'KFC', category: 'catering' },
-          'kentucky': { name: 'KFC', category: 'catering' },
+          'kentucky fried': { name: 'KFC', category: 'catering' },
           'mcdonald': { name: 'McDonalds', category: 'catering' },
           'burger king': { name: 'Burger King', category: 'catering' },
-          'wendy\'s': { name: 'Wendys', category: 'catering' },
+          'wendy': { name: 'Wendys', category: 'catering' },
           'subway': { name: 'Subway', category: 'catering' },
           'pizza hut': { name: 'Pizza Hut', category: 'catering' },
           'domino': { name: 'Dominos', category: 'catering' },
           'hell pizza': { name: 'Hell Pizza', category: 'catering' },
-          'sal\'s': { name: 'Sals Pizza', category: 'catering' },
+          'sal\'s': { name: 'Sals', category: 'catering' },
           'starbucks': { name: 'Starbucks', category: 'catering' },
-          'coffee club': { name: 'Coffee Club', category: 'catering' },
-          'columbus': { name: 'Columbus Coffee', category: 'catering' },
-          'tank': { name: 'Tank Juice', category: 'catering' },
           'nando': { name: 'Nandos', category: 'catering' },
           'carl\'s jr': { name: 'Carls Jr', category: 'catering' },
+          'tank': { name: 'Tank', category: 'catering' },
           // Liquor
           'super liquor': { name: 'Super Liquor', category: 'drinks' },
           'liquorland': { name: 'Liquorland', category: 'drinks' },
           'liquor king': { name: 'Liquor King', category: 'drinks' },
           'henry\'s': { name: 'Henrys', category: 'drinks' },
-          'bottle-o': { name: 'Bottle-O', category: 'drinks' },
           'big barrel': { name: 'Big Barrel', category: 'drinks' },
-          'blackbull': { name: 'Black Bull', category: 'drinks' },
           // Petrol
           'z energy': { name: 'Z Energy', category: 'petrol' },
-          'z station': { name: 'Z Energy', category: 'petrol' },
-          'bp ': { name: 'BP', category: 'petrol' },
           'bp connect': { name: 'BP', category: 'petrol' },
+          'bp ': { name: 'BP', category: 'petrol' },
           'mobil': { name: 'Mobil', category: 'petrol' },
           'gull': { name: 'Gull', category: 'petrol' },
           'caltex': { name: 'Caltex', category: 'petrol' },
@@ -1343,28 +1434,22 @@ Respond with ONLY valid JSON:
           'whitcoulls': { name: 'Whitcoulls', category: 'printing' },
           'paper plus': { name: 'Paper Plus', category: 'printing' },
           'mitre 10': { name: 'Mitre 10', category: 'misc' },
-          'mitre10': { name: 'Mitre 10', category: 'misc' },
           'bunnings': { name: 'Bunnings', category: 'misc' },
           'briscoes': { name: 'Briscoes', category: 'misc' },
-          'rebel sport': { name: 'Rebel Sport', category: 'misc' },
           'jb hi-fi': { name: 'JB Hi-Fi', category: 'misc' },
           'noel leeming': { name: 'Noel Leeming', category: 'misc' },
           'harvey norman': { name: 'Harvey Norman', category: 'misc' },
           // Flowers
-          'interflora': { name: 'Interflora', category: 'flowers' },
-          'fleurop': { name: 'Fleurop', category: 'flowers' },
           'florist': { name: 'Florist', category: 'flowers' },
+          'interflora': { name: 'Interflora', category: 'flowers' },
           'bloom': { name: 'Bloom', category: 'flowers' },
           // Funeral
           'funeral': { name: 'Funeral Services', category: 'funeral_home' },
           'mortuary': { name: 'Mortuary', category: 'funeral_home' },
-          'guardian': { name: 'Guardian Funerals', category: 'funeral_home' },
-          'lychgate': { name: 'Lychgate', category: 'funeral_home' },
-          'davis': { name: 'Davis Funerals', category: 'funeral_home' },
-          'simplicity': { name: 'Simplicity', category: 'funeral_home' },
+          'guardian funeral': { name: 'Guardian Funerals', category: 'funeral_home' },
+          'simplicity': { name: 'Simplicity Funerals', category: 'funeral_home' },
         };
         
-        // Check first 10 lines for store names
         const headerText = lines.slice(0, 10).join(' ').toLowerCase();
         for (const [pattern, info] of Object.entries(nzStores)) {
           if (headerText.includes(pattern)) {
@@ -1374,25 +1459,21 @@ Respond with ONLY valid JSON:
           }
         }
         
-        // If no known store, get first meaningful line
+        // If no known store, find first meaningful line
         if (!vendor) {
           const skipPatterns = [
             /^\s*$/, /^[\d\s\-\.\:\/]+$/, /^tax\s*inv/i, /^invoice/i, /^receipt/i,
-            /^customer/i, /^copy/i, /^eftpos/i, /^terminal/i, /^gst/i, /^abn/i,
-            /^nzbn/i, /^ph[:\s]/i, /^tel[:\s]/i, /^fax/i, /www\./i, /\.co\.nz/i,
-            /\.com/i, /^date/i, /^time/i, /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/,
-            /^\d{1,2}:\d{2}/, /^#?\d{5,}/, /approved/i, /declined/i
+            /^customer/i, /^eftpos/i, /^terminal/i, /^gst/i, /^nzbn/i, /^abn/i,
+            /www\./i, /\.co\.nz/i, /\.com/i, /^date/i, /^time/i, /^#?\d{5,}/,
+            /^\d{1,2}[\/\-]\d{1,2}/, /approved/i, /declined/i, /^ph[:\s]/i, /^tel/i
           ];
           
           for (const line of lines.slice(0, 8)) {
             const trimmed = line.trim();
             if (trimmed.length < 3 || trimmed.length > 50) continue;
             if (skipPatterns.some(p => p.test(trimmed))) continue;
-            // Skip if mostly numbers
-            const digits = (trimmed.match(/\d/g) || []).length;
-            if (digits > trimmed.length * 0.5) continue;
-            // Skip addresses
-            if (/\b(street|st|road|rd|ave|avenue|drive|dr|lane|ln|place|pl|way|cres|terrace|tce)\b/i.test(trimmed)) continue;
+            if ((trimmed.match(/\d/g) || []).length > trimmed.length * 0.5) continue;
+            if (/\b(street|st|road|rd|ave|drive|dr|lane|place|way|tce|cres)\b/i.test(trimmed)) continue;
             
             vendor = trimmed;
             break;
@@ -1402,46 +1483,29 @@ Respond with ONLY valid JSON:
         if (!vendor) vendor = 'Receipt';
         
         // =====================
-        // STEP 5: FIND DATE (NZ format DD/MM/YYYY)
+        // STEP 6: FIND DATE & TIME
         // =====================
         
-        const datePatterns = [
-          /(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})/, // DD/MM/YYYY
-          /(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\b/, // DD/MM/YY
-        ];
-        
+        // Date (NZ format: DD/MM/YYYY)
         for (const line of lines) {
-          // Skip price lines
-          if (/\$\s*\d+\.\d{2}/.test(line) && lines.indexOf(line) > 5) continue;
-          
-          for (const pattern of datePatterns) {
-            const match = line.match(pattern);
-            if (match) {
-              let day = parseInt(match[1]);
-              let month = parseInt(match[2]);
-              let year = match[3].length === 2 ? parseInt('20' + match[3]) : parseInt(match[3]);
-              
-              // NZ uses DD/MM/YYYY - validate
-              if (day > 12 && month <= 12) {
-                // Definitely DD/MM format
-              } else if (month > 12 && day <= 12) {
-                // Probably MM/DD format (US), swap
-                [day, month] = [month, day];
-              }
-              
-              if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2020 && year <= 2030) {
-                date = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
-                break;
-              }
+          const dateMatch = line.match(/(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
+          if (dateMatch) {
+            let day = parseInt(dateMatch[1]);
+            let month = parseInt(dateMatch[2]);
+            let year = dateMatch[3].length === 2 ? 2000 + parseInt(dateMatch[3]) : parseInt(dateMatch[3]);
+            
+            // NZ uses DD/MM - if day > 12, it's definitely DD/MM
+            if (day > 12 && month <= 12) { /* DD/MM confirmed */ }
+            else if (month > 12 && day <= 12) { [day, month] = [month, day]; } // Swap if MM/DD
+            
+            if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2020 && year <= 2030) {
+              date = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+              break;
             }
           }
-          if (date) break;
         }
         
-        // =====================
-        // STEP 6: FIND TIME
-        // =====================
-        
+        // Time
         const timeMatch = allText.match(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(am|pm))?\b/i);
         if (timeMatch) {
           let hour = parseInt(timeMatch[1]);
@@ -1462,9 +1526,8 @@ Respond with ONLY valid JSON:
         else if (allText.includes('eftpos')) paymentMethod = 'EFTPOS';
         else if (allText.includes('debit')) paymentMethod = 'Debit Card';
         else if (allText.includes('credit')) paymentMethod = 'Credit Card';
-        else if (allText.includes('cash') && !allText.includes('cash out')) paymentMethod = 'Cash';
+        else if (tendered > 0 || (allText.includes('cash') && change > 0)) paymentMethod = 'Cash';
         
-        // Card last 4 digits
         const cardMatch = allText.match(/[*xX]{4}\s*(\d{4})/);
         if (cardMatch) cardLastFour = cardMatch[1];
         
@@ -1472,11 +1535,9 @@ Respond with ONLY valid JSON:
         // STEP 8: EXTRACT ITEMS
         // =====================
         
-        // Items are usually between header and totals (position 0.1 to 0.7)
-        for (let i = Math.floor(lines.length * 0.1); i < Math.floor(lines.length * 0.8); i++) {
+        for (let i = Math.floor(lines.length * 0.1); i < Math.floor(lines.length * 0.75); i++) {
           const line = lines[i];
-          // Skip if it's a key amount line
-          if (/total|subtotal|gst|tax|eftpos|paid|change|tender/i.test(line)) continue;
+          if (/total|subtotal|gst|tax|eftpos|paid|change|tender|cash|balance/i.test(line)) continue;
           
           const itemMatch = line.match(/^(.{3,35}?)\s+\$?\s*(\d{1,3})[.,](\d{2})\s*$/);
           if (itemMatch) {
@@ -1488,22 +1549,15 @@ Respond with ONLY valid JSON:
         }
         
         // =====================
-        // FINAL VERIFICATION
+        // FINAL OUTPUT
         // =====================
         
-        console.log('=== PARSE RESULT ===');
-        console.log('Total:', total, '| Subtotal:', subtotal, '| GST:', gst);
+        console.log('=== FINAL RESULT ===');
+        console.log('Total: $' + total.toFixed(2));
+        console.log('Subtotal: $' + (subtotal || 0).toFixed(2), '| GST: $' + (gst || 0).toFixed(2));
+        console.log('Tendered: $' + (tendered || 0).toFixed(2), '| Change: $' + (change || 0).toFixed(2));
         console.log('Vendor:', vendor, '| Category:', category);
-        console.log('Payment:', paymentMethod, '| Card:', cardLastFour);
-        console.log('Date:', date, '| Time:', time);
-        
-        // Verify GST math (NZ: Total = Subtotal × 1.15)
-        if (subtotal > 0 && gst > 0) {
-          const expectedTotal = subtotal + gst;
-          if (total > 0 && Math.abs(total - expectedTotal) > 1) {
-            console.log('Warning: Total doesn\'t match Subtotal + GST. Expected', expectedTotal);
-          }
-        }
+        console.log('Payment:', paymentMethod || 'Unknown');
         
         return { 
           total, 
