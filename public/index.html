@@ -52,6 +52,38 @@
       set: (k, v) => { try { localStorage.setItem('koha_' + k, JSON.stringify(v)) } catch {} }
     };
 
+    // Copy to clipboard with iOS fallback
+    const copyToClipboard = async (text) => {
+      try {
+        // Try modern clipboard API first
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (e) {
+        console.log('Clipboard API failed, trying fallback');
+      }
+      
+      // Fallback for iOS Safari and older browsers
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        textarea.setAttribute('readonly', '');
+        document.body.appendChild(textarea);
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length); // iOS specific
+        const success = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return success;
+      } catch (e) {
+        console.error('Copy failed:', e);
+        return false;
+      }
+    };
+
     // HuggingFace API
     // AI calls now go through our server-side API (key kept secret)
     const AI_API = '/api/ai';
@@ -516,14 +548,18 @@ Respond with ONLY valid JSON:
         );
       });
 
+      // Dynamic font size based on total length
+      const totalStr = fmt(total);
+      const fontSize = totalStr.length > 8 ? 12 : totalStr.length > 6 ? 14 : 18;
+
       return (
         <div className="flex flex-col items-center">
           {title && <p className="text-slate-400 text-sm font-medium mb-2">{title}</p>}
           <svg width={size} height={size} className="drop-shadow-lg">
             {paths}
             <circle cx={size/2} cy={size/2} r={size/4} fill="#0f172a" />
-            <text x={size/2} y={size/2} textAnchor="middle" dy=".1em" className="fill-white text-lg font-bold">{fmt(total)}</text>
-            <text x={size/2} y={size/2 + 16} textAnchor="middle" className="fill-slate-400 text-xs">total</text>
+            <text x={size/2} y={size/2} textAnchor="middle" dy=".1em" fill="white" fontWeight="bold" style={{ fontSize: fontSize + 'px' }}>{totalStr}</text>
+            <text x={size/2} y={size/2 + 14} textAnchor="middle" fill="#94a3b8" style={{ fontSize: '10px' }}>total</text>
           </svg>
           {showLegend && (
             <div className="mt-3 space-y-1 w-full max-w-xs">
@@ -531,9 +567,9 @@ Respond with ONLY valid JSON:
                 <div key={i} className="flex items-center justify-between text-sm">
                   <div className="flex items-center gap-2">
                     <div className="w-3 h-3 rounded-full" style={{ backgroundColor: d.color }} />
-                    <span className="text-slate-300">{d.label}</span>
+                    <span className="text-slate-300 truncate max-w-[100px]">{d.label}</span>
                   </div>
-                  <span className="text-slate-400">{fmt(d.value)} ({((d.value/total)*100).toFixed(0)}%)</span>
+                  <span className="text-slate-400 text-xs whitespace-nowrap">{fmt(d.value)} ({((d.value/total)*100).toFixed(0)}%)</span>
                 </div>
               ))}
             </div>
@@ -754,14 +790,21 @@ Respond with ONLY valid JSON:
           const results = { ...validationResults };
           const giftResults = { ...giftValidationResults };
           const giftsToValidate = includeGifts ? gifts : [];
-          const totalExpenses = expensesToValidate.length;
+          
+          // Filter out already dismissed items - don't re-validate them
+          const expensesToActuallyValidate = expensesToValidate.filter(e => {
+            const existing = results[e.id];
+            return !existing?.dismissed; // Skip if dismissed
+          });
+          
+          const totalExpenses = expensesToActuallyValidate.length;
           const totalGifts = giftsToValidate.length;
           const total = totalExpenses + totalGifts;
           let processed = 0;
           
           // Validate expenses
           for (let i = 0; i < totalExpenses; i++) {
-            const expense = expensesToValidate[i];
+            const expense = expensesToActuallyValidate[i];
             const category = getCategoryById(expense.category);
             
             processed++;
@@ -803,10 +846,13 @@ Respond with ONLY valid JSON:
             await new Promise(r => setTimeout(r, 500));
           }
           
+          // Preserve dismissed flag if it was set
+          const existingResult = results[expense.id];
           results[expense.id] = {
             ...result,
             validatedAt: Date.now(),
-            originalCategory: expense.category
+            originalCategory: expense.category,
+            dismissed: existingResult?.dismissed || false
           };
         }
         
@@ -2169,11 +2215,15 @@ Respond with ONLY valid JSON:
           log('--- Finished ---');
         };
 
-        const copyFamilyCode = () => {
+        const copyFamilyCode = async () => {
           // Just copy the 5-letter code
-          navigator.clipboard.writeText(syncBinId);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
+          const success = await copyToClipboard(syncBinId);
+          if (success) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          } else {
+            alert('Copy failed. Code is: ' + syncBinId);
+          }
         };
 
         const handleJoinSync = async () => {
@@ -2213,7 +2263,7 @@ Respond with ONLY valid JSON:
         // Export all data as shareable code
         const [exportedCode, setExportedCode] = useState('');
         
-        const handleExport = () => {
+        const handleExport = async () => {
           const data = {
             gifts,
             expenses,
@@ -2223,12 +2273,10 @@ Respond with ONLY valid JSON:
           };
           const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
           setExportedCode(encoded);
-          try {
-            navigator.clipboard.writeText(encoded);
+          const success = await copyToClipboard(encoded);
+          if (success) {
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
-          } catch (e) {
-            console.log('Clipboard failed');
           }
         };
 
@@ -2302,8 +2350,18 @@ Respond with ONLY valid JSON:
                     {syncing ? '🔄 Syncing...' : '🔄 Sync Now'}
                   </button>
                   
-                  <button onClick={() => { setSyncCode(null); setSyncBinId(null); }} className="w-full py-3 bg-red-900/30 rounded-xl text-red-400 text-sm">
-                    Disconnect
+                  <button 
+                    onClick={() => { 
+                      if (confirm('Leave Family Sync?\n\nYour local data will stay on this device, but you will no longer receive updates from family members.\n\nNote: If you are the last member, the sync data will remain in the cloud until another device reconnects with this code.')) {
+                        setSyncCode(null); 
+                        setSyncBinId(null);
+                        setStatus('Disconnected from family sync');
+                        setTimeout(() => setStatus(''), 3000);
+                      }
+                    }} 
+                    className="w-full py-3 bg-red-900/30 rounded-xl text-red-400 text-sm"
+                  >
+                    🚪 Leave Family Sync
                   </button>
                 </>
               ) : (
@@ -2394,7 +2452,10 @@ Respond with ONLY valid JSON:
                     onClick={(e) => e.target.select()}
                   />
                   <button 
-                    onClick={() => { navigator.clipboard.writeText(debugLog); }}
+                    onClick={async () => { 
+                      const success = await copyToClipboard(debugLog);
+                      alert(success ? 'Debug log copied!' : 'Copy failed. Please select and copy manually.');
+                    }}
                     className="w-full py-2 bg-slate-700 rounded-lg text-sm mt-2"
                   >
                     📋 Copy Log
@@ -3202,7 +3263,16 @@ Respond with ONLY valid JSON:
                             />
                             <div className="flex gap-2 mt-3">
                               <button 
-                                onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(debugLog); }}
+                                onClick={async (e) => { 
+                                  e.preventDefault(); 
+                                  const success = await copyToClipboard(debugLog);
+                                  if (success) {
+                                    e.target.textContent = '✓ Copied!';
+                                    setTimeout(() => { e.target.textContent = '📋 Copy'; }, 2000);
+                                  } else {
+                                    alert('Copy failed. Please select text and copy manually.');
+                                  }
+                                }}
                                 className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium"
                               >
                                 📋 Copy
@@ -3396,7 +3466,16 @@ Respond with ONLY valid JSON:
                     />
                     <div className="flex gap-2 mt-3">
                       <button 
-                        onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(debugLog); }}
+                        onClick={async (e) => { 
+                          e.preventDefault(); 
+                          const success = await copyToClipboard(debugLog);
+                          if (success) {
+                            e.target.textContent = '✓ Copied!';
+                            setTimeout(() => { e.target.textContent = '📋 Copy'; }, 2000);
+                          } else {
+                            alert('Copy failed. Please select text and copy manually.');
+                          }
+                        }}
                         className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium"
                       >
                         📋 Copy
