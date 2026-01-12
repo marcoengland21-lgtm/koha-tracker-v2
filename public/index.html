@@ -2499,16 +2499,33 @@ Respond with ONLY the JSON object.
         const [showReceipt, setShowReceipt] = useState(false);
         const [photoTaken, setPhotoTaken] = useState(editing ? true : false);
         const [scanStatus, setScanStatus] = useState('');
-        const [debugLog, setDebugLog] = useState('');
+        const [debugLog, setDebugLog] = useState(() => localStorage.getItem('scan_debug_log') || '');
+        const [showDebugLog, setShowDebugLog] = useState(false);
         const fileInputRef = useRef(null);
         const canvasRef = useRef(null);
         
-        // Debug logger
+        // Debug logger - persists to localStorage
         const log = (msg) => {
           const timestamp = new Date().toLocaleTimeString();
+          const entry = '[' + timestamp + '] ' + msg;
           console.log('[SCAN] ' + msg);
-          setDebugLog(prev => prev + '\n[' + timestamp + '] ' + msg);
+          setDebugLog(prev => {
+            const newLog = prev + '\n' + entry;
+            localStorage.setItem('scan_debug_log', newLog);
+            return newLog;
+          });
         };
+        
+        // Clear log helper
+        const clearLog = () => {
+          localStorage.removeItem('scan_debug_log');
+          setDebugLog('');
+        };
+        
+        // Log on mount
+        useEffect(() => {
+          log('AddExpense mounted, editing=' + editing + ', photoTaken=' + photoTaken);
+        }, []);
         
         // Get receipt (from pending scan or existing expense)
         const currentReceipt = pendingReceipt || (editing && editingItem?.receipt) || null;
@@ -2875,22 +2892,44 @@ Respond with ONLY the JSON object.
                         </button>
                       </div>
                       
-                      {/* Debug Log */}
-                      {debugLog && (
-                        <div className="w-full max-w-xs mt-6">
-                          <p className="text-slate-500 text-xs mb-2">📋 Debug Log (copy if something's wrong)</p>
-                          <textarea 
-                            readOnly 
-                            value={debugLog}
-                            className="w-full bg-slate-900 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-32"
-                            onClick={(e) => e.target.select()}
-                          />
-                          <button 
-                            onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(debugLog); }}
-                            className="w-full py-2 bg-slate-800 rounded-lg text-sm mt-2"
-                          >
-                            📋 Copy Log
-                          </button>
+                      {/* Floating Debug Button */}
+                      <button 
+                        onClick={(e) => { e.preventDefault(); setShowDebugLog(true); }}
+                        className="fixed bottom-24 right-4 w-12 h-12 bg-slate-800 rounded-full flex items-center justify-center text-xl border border-slate-700 z-50"
+                      >
+                        🐛
+                      </button>
+                      
+                      {/* Debug Log Modal */}
+                      {showDebugLog && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setShowDebugLog(false)}>
+                          <div className="absolute inset-0 bg-slate-950/90" />
+                          <div className="relative bg-slate-900 w-full max-w-md rounded-2xl p-4 border border-slate-700" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex justify-between items-center mb-3">
+                              <h3 className="text-white font-bold">🐛 Debug Log</h3>
+                              <button onClick={() => setShowDebugLog(false)} className="text-slate-400 text-xl">×</button>
+                            </div>
+                            <textarea 
+                              readOnly 
+                              value={debugLog || '(empty - no events logged yet)'}
+                              className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-48"
+                              onClick={(e) => e.target.select()}
+                            />
+                            <div className="flex gap-2 mt-3">
+                              <button 
+                                onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(debugLog); }}
+                                className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium"
+                              >
+                                📋 Copy
+                              </button>
+                              <button 
+                                onClick={(e) => { e.preventDefault(); clearLog(); }}
+                                className="flex-1 py-2 bg-slate-700 rounded-lg text-sm"
+                              >
+                                🗑️ Clear
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </>
