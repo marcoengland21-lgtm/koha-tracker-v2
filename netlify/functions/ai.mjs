@@ -1,4 +1,8 @@
+// Netlify Function for AI calls
+// HF_TOKEN is stored as environment variable, never in code
+
 export default async (req) => {
+  // Handle CORS
   if (req.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -33,8 +37,9 @@ export default async (req) => {
       });
     }
 
+    // OCR: Extract text from receipt image
     if (action === "ocr") {
-      const ocrResponse = await fetch('https://api-inference.huggingface.co/models/naver-clova-ix/donut-base-finetuned-cord-v2', {
+      const ocrResponse = await fetch('https://router.huggingface.co/hf-inference/models/naver-clova-ix/donut-base-finetuned-cord-v2', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${HF_TOKEN}`,
@@ -61,8 +66,9 @@ export default async (req) => {
       });
     }
 
+    // Parse or Validate: Use Mistral
     if (action === "parse" || action === "validate") {
-      const parseResponse = await fetch('https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2', {
+      const parseResponse = await fetch('https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${HF_TOKEN}`,
@@ -95,6 +101,7 @@ export default async (req) => {
     });
 
   } catch (error) {
+    console.error("AI error:", error);
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: corsHeaders,
