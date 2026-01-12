@@ -979,6 +979,18 @@ Respond with ONLY valid JSON:
             scannedAt: new Date().toISOString()
           };
 
+          // SAVE TO LOCALSTORAGE IMMEDIATELY before any state updates
+          // This ensures we don't lose the result if page reloads
+          try {
+            localStorage.setItem('pending_scan_result', JSON.stringify({
+              ...finalResult,
+              savedAt: Date.now()
+            }));
+            apiLog('Saved result to localStorage immediately');
+          } catch (e) {
+            apiLog('Failed to save result: ' + e.message);
+          }
+
           apiLog('Final result: total=' + finalResult.total + ', vendor=' + finalResult.vendor);
           setScanResult(finalResult);
           setScanning(false);
@@ -1050,9 +1062,49 @@ Respond with ONLY valid JSON:
           }
         }
         
-        // If no vendor found, use first non-empty line
+        // Skip generic words that aren't actual store names
+        const genericWords = ['cash receipt', 'receipt', 'tax invoice', 'invoice', 'eftpos', 'customer copy'];
+        
+        // If no vendor found, look for address pattern
+        if (!vendor) {
+          // Also look for "Address:" or "Adress:" lines
+          const addressLinePattern = /(?:address|adress)[:\s]+(.+)/i;
+          for (const line of lines.slice(0, 8)) {
+            const addrMatch = line.match(addressLinePattern);
+            if (addrMatch && addrMatch[1].length > 5) {
+              vendor = addrMatch[1].trim().substring(0, 40);
+              break;
+            }
+          }
+        }
+        
+        // Try street address pattern
+        if (!vendor) {
+          const addressPattern = /(\d+\s+[A-Za-z]+(?:\s+[A-Za-z]+)*(?:\s+(?:street|st|road|rd|avenue|ave|drive|dr|lane|ln|place|pl|way|crescent|cres))?)/i;
+          for (const line of lines.slice(0, 8)) {
+            const match = line.match(addressPattern);
+            if (match && match[1].length > 5) {
+              vendor = match[1].trim();
+              break;
+            }
+          }
+        }
+        
+        // If still no vendor, use first non-generic line
         if (!vendor && lines.length > 0) {
-          vendor = lines[0].substring(0, 30);
+          for (const line of lines.slice(0, 5)) {
+            const cleanLine = line.trim();
+            const isGeneric = genericWords.some(g => cleanLine.toLowerCase().includes(g));
+            if (cleanLine.length > 2 && cleanLine.length < 40 && !isGeneric) {
+              vendor = cleanLine;
+              break;
+            }
+          }
+        }
+        
+        // Final fallback
+        if (!vendor) {
+          vendor = 'Receipt';
         }
         
         // Find total - look for common patterns
@@ -2609,13 +2661,52 @@ Respond with ONLY valid JSON:
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing + ', photoTaken=' + photoTaken);
           
-          // Check if we have a pending scan from before a page reload
+          // Check if we have a completed scan result to recover
+          const pendingScanResult = localStorage.getItem('pending_scan_result');
+          if (pendingScanResult && !editing) {
+            try {
+              const result = JSON.parse(pendingScanResult);
+              const age = Date.now() - (result.savedAt || 0);
+              log('Found pending scan RESULT from ' + Math.round(age/1000) + 's ago');
+              
+              if (age < 300000) { // 5 minutes
+                log('Recovering scan result: total=' + result.total + ', vendor=' + result.vendor);
+                
+                // Fill form directly
+                if (result.total) setAmount(result.total.toString());
+                if (result.vendor) setDescription(result.vendor);
+                if (result.category) setCategory(result.category);
+                if (result.date) setDate(result.date);
+                
+                setPendingReceipt({
+                  originalImage: result.originalImage,
+                  vendor: result.vendor,
+                  total: result.total,
+                  items: result.items,
+                  rawText: result.rawText
+                });
+                setPhotoTaken(true);
+                setLastScanInfo({ vendor: result.vendor, total: result.total, success: true, message: 'Recovered! Review and save.' });
+                
+                // Clear it so we don't recover again
+                localStorage.removeItem('pending_scan_result');
+                localStorage.removeItem('pending_scan_image');
+                localStorage.removeItem('pending_scan_time');
+                return;
+              }
+            } catch (e) {
+              log('Error parsing scan result: ' + e.message);
+            }
+            localStorage.removeItem('pending_scan_result');
+          }
+          
+          // Check if we have a pending image (no result yet)
           const pendingImage = localStorage.getItem('pending_scan_image');
           const pendingTime = localStorage.getItem('pending_scan_time');
           
           if (pendingImage && pendingTime && !editing && !photoTaken) {
             const age = Date.now() - parseInt(pendingTime);
-            log('Found pending scan from ' + Math.round(age/1000) + 's ago');
+            log('Found pending scan IMAGE from ' + Math.round(age/1000) + 's ago');
             
             // Only recover if less than 5 minutes old
             if (age < 300000) {
@@ -2654,6 +2745,9 @@ Respond with ONLY valid JSON:
             const result = await scanReceipt(pendingReceipt.originalImage);
             log('scanReceipt returned: ' + JSON.stringify(result).substring(0, 500));
             
+            // scanReceipt already saves to localStorage, so if we get here without reload,
+            // we can proceed to fill the form and then clear localStorage
+            
             if (result && result.total) {
               log('SUCCESS: total=' + result.total + ', vendor=' + result.vendor + ', category=' + result.category);
               setAmount(result.total.toString());
@@ -2685,15 +2779,18 @@ Respond with ONLY valid JSON:
               // Clear localStorage on success
               localStorage.removeItem('pending_scan_image');
               localStorage.removeItem('pending_scan_time');
+              localStorage.removeItem('pending_scan_result');
               log('Cleared localStorage, form should be filled');
             } else {
               log('WARN: No total in result. Full result: ' + JSON.stringify(result));
               setLastScanInfo({ error: true, message: 'Could not read receipt. Enter details manually.' });
+              localStorage.removeItem('pending_scan_result');
             }
           } catch (err) {
             log('ERROR in runAIScan: ' + err.message);
             log('Error stack: ' + err.stack);
             setLastScanInfo({ error: true, message: 'AI error: ' + err.message });
+            localStorage.removeItem('pending_scan_result');
           }
           
           setScanningLocal(false);
