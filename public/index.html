@@ -31,6 +31,7 @@
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     .fade-in { animation: fadeIn 0.2s ease-out; }
     @keyframes progressBar { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
+    @keyframes scan { 0% { top: 0; } 50% { top: 100%; } 100% { top: 0; } }
     .progress-animated { 
       background: linear-gradient(90deg, #06b6d4, #8b5cf6, #ec4899, #06b6d4);
       background-size: 300% 100%;
@@ -2535,10 +2536,11 @@ Respond with ONLY the JSON object.
           });
         };
 
-        // Start live camera
+        // Start live camera with auto-scan
         const startCamera = async () => {
           setCameraError(null);
           setShowCamera(true);
+          setScanStatus('starting');
           try {
             const stream = await navigator.mediaDevices.getUserMedia({
               video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
@@ -2546,11 +2548,21 @@ Respond with ONLY the JSON object.
             streamRef.current = stream;
             if (videoRef.current) {
               videoRef.current.srcObject = stream;
+              videoRef.current.onloadedmetadata = () => {
+                videoRef.current.play();
+                // Start auto-scan after camera is ready
+                setTimeout(() => {
+                  setScanStatus('positioning');
+                  // Auto-capture after 2 seconds of positioning
+                  setTimeout(() => autoCapture(), 2000);
+                }, 500);
+              };
             }
           } catch (err) {
             console.error('Camera error:', err);
             setCameraError('Could not access camera');
             setShowCamera(false);
+            setScanStatus('');
           }
         };
 
@@ -2561,11 +2573,17 @@ Respond with ONLY the JSON object.
             streamRef.current = null;
           }
           setShowCamera(false);
+          setScanStatus('');
         };
 
-        // Capture from live camera
-        const capturePhoto = async () => {
-          if (!videoRef.current || !canvasRef.current) return;
+        // Auto capture and scan
+        const autoCapture = async () => {
+          if (!videoRef.current || !canvasRef.current || !showCamera) return;
+          
+          setScanStatus('capturing');
+          
+          // Brief pause for visual feedback
+          await new Promise(r => setTimeout(r, 400));
           
           const video = videoRef.current;
           const canvas = canvasRef.current;
@@ -2575,15 +2593,16 @@ Respond with ONLY the JSON object.
           ctx.drawImage(video, 0, 0);
           
           const base64 = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
-          stopCamera();
           
-          // Process the captured image
-          setScanningLocal(true);
-          setScanStatus('Compressing...');
+          setScanStatus('reading');
+          
+          // Compress
           const compressed = await compressImage(base64, 1200, 0.8);
           
-          setScanStatus('Reading receipt...');
+          // Scan with AI
           const result = await scanReceipt(compressed);
+          
+          stopCamera();
           
           if (result && result.total) {
             setAmount(result.total.toString());
@@ -2603,6 +2622,7 @@ Respond with ONLY the JSON object.
             });
             
             setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
+            setShowReceipt(true);
           } else {
             setPendingReceipt({
               originalImage: compressed,
@@ -2614,10 +2634,12 @@ Respond with ONLY the JSON object.
           }
           
           setPhotoTaken(true);
-          setScanningLocal(false);
           setScanStatus('');
           setTimeout(() => setLastScanInfo(null), 8000);
         };
+
+        // Manual capture (for retry)
+        const capturePhoto = autoCapture;
 
         // Cleanup camera on unmount
         useEffect(() => {
@@ -2749,7 +2771,7 @@ Respond with ONLY the JSON object.
           const file = e.target.files?.[0];
           if (!file) return;
           setScanningLocal(true);
-          setScanStatus('Loading image...');
+          setScanStatus('Loading...');
           setLastScanInfo(null);
           
           const reader = new FileReader();
@@ -2781,6 +2803,7 @@ Respond with ONLY the JSON object.
               });
               
               setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
+              setShowReceipt(true); // Show the result popup
             } else {
               setPendingReceipt({
                 originalImage: compressed,
@@ -2835,65 +2858,121 @@ Respond with ONLY the JSON object.
               
               {/* Show photo prompt for new expenses without photo */}
               {!editing && !photoTaken ? (
-                <div className="flex flex-col items-center justify-center min-h-[60vh]">
+                <div className="fixed inset-0 bg-slate-950 z-40 flex flex-col">
                   <input ref={fileInputRef} type="file" accept="image/*" onChange={handleScan} className="hidden" />
                   <canvas ref={canvasRef} className="hidden" />
                   
-                  {/* Live Camera View */}
+                  {/* Header */}
+                  <div className="flex items-center justify-between p-4 pt-8">
+                    <button 
+                      onClick={() => { stopCamera(); setScreen('home'); }} 
+                      className="text-white text-lg px-3 py-1"
+                    >
+                      ✕
+                    </button>
+                    <h1 className="text-white font-bold">Scan Receipt</h1>
+                    <div className="w-10"></div>
+                  </div>
+                  
+                  {/* Camera View - Auto scanning */}
                   {showCamera ? (
-                    <div className="w-full relative">
-                      <video 
-                        ref={videoRef} 
-                        autoPlay 
-                        playsInline 
-                        className="w-full rounded-2xl"
-                      />
-                      {/* Viewfinder overlay */}
-                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <div className="w-[85%] h-[60%] border-2 border-white/50 rounded-xl">
-                          <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-black/50 px-3 py-1 rounded-full">
-                            <p className="text-white text-xs">Position receipt in frame</p>
+                    <div className="flex-1 flex flex-col">
+                      <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden">
+                        <video 
+                          ref={videoRef} 
+                          autoPlay 
+                          playsInline
+                          muted
+                          className="absolute inset-0 w-full h-full object-cover"
+                        />
+                        
+                        {/* Scanning overlay */}
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          {/* Dark overlay outside viewfinder */}
+                          <div className="absolute inset-0 bg-black/60"></div>
+                          
+                          {/* Viewfinder box */}
+                          <div 
+                            className={`relative w-[85%] h-[55%] rounded-2xl border-4 transition-all duration-500 ${
+                              scanStatus === 'reading' ? 'border-green-500 shadow-[0_0_30px_rgba(34,197,94,0.5)]' :
+                              scanStatus === 'capturing' ? 'border-yellow-400 shadow-[0_0_30px_rgba(250,204,21,0.5)]' :
+                              scanStatus === 'positioning' ? 'border-white/80' :
+                              'border-white/40'
+                            }`}
+                            style={{ boxShadow: scanStatus === 'reading' || scanStatus === 'capturing' ? undefined : '0 0 0 9999px rgba(0,0,0,0.6)' }}
+                          >
+                            {/* Scanning line animation */}
+                            {(scanStatus === 'positioning' || scanStatus === 'capturing') && (
+                              <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-transparent via-white to-transparent animate-pulse"></div>
+                            )}
+                            {scanStatus === 'reading' && (
+                              <div className="absolute inset-0 overflow-hidden rounded-xl">
+                                <div className="absolute inset-x-0 h-1 bg-green-400 animate-[scan_1.5s_ease-in-out_infinite]"></div>
+                              </div>
+                            )}
+                            
+                            {/* Corner markers */}
+                            <div className={`absolute -top-1 -left-1 w-10 h-10 border-t-4 border-l-4 rounded-tl-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
+                            <div className={`absolute -top-1 -right-1 w-10 h-10 border-t-4 border-r-4 rounded-tr-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
+                            <div className={`absolute -bottom-1 -left-1 w-10 h-10 border-b-4 border-l-4 rounded-bl-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
+                            <div className={`absolute -bottom-1 -right-1 w-10 h-10 border-b-4 border-r-4 rounded-br-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
+                          </div>
+                        </div>
+                        
+                        {/* Status text */}
+                        <div className="absolute bottom-8 left-0 right-0 flex justify-center">
+                          <div className={`px-5 py-3 rounded-2xl text-base font-medium flex items-center gap-3 ${
+                            scanStatus === 'reading' ? 'bg-green-600 text-white' :
+                            scanStatus === 'capturing' ? 'bg-yellow-500 text-black' :
+                            'bg-black/70 text-white'
+                          }`}>
+                            {scanStatus === 'reading' ? (
+                              <><span className="animate-spin">⏳</span> Reading receipt...</>
+                            ) : scanStatus === 'capturing' ? (
+                              <><span>📸</span> Capturing...</>
+                            ) : scanStatus === 'positioning' ? (
+                              <><span className="animate-pulse">📋</span> Hold steady over receipt</>
+                            ) : (
+                              <><span className="animate-pulse">⏳</span> Starting camera...</>
+                            )}
                           </div>
                         </div>
                       </div>
-                      {/* Capture buttons */}
-                      <div className="flex gap-3 mt-4">
+                      
+                      {/* Cancel button only */}
+                      <div className="bg-slate-950 p-4 pb-8 flex justify-center">
                         <button 
-                          onClick={stopCamera}
-                          className="flex-1 py-3 bg-slate-800 rounded-xl text-slate-300"
+                          onClick={() => { stopCamera(); setScreen('home'); }}
+                          className="px-8 py-3 bg-slate-800 rounded-xl text-slate-300 font-medium"
                         >
                           Cancel
-                        </button>
-                        <button 
-                          onClick={capturePhoto}
-                          className="flex-1 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-xl font-bold"
-                        >
-                          📸 Capture
                         </button>
                       </div>
                     </div>
                   ) : scanningLocal ? (
-                    /* Scanning in progress */
-                    <div className="text-center">
-                      <div className="text-6xl mb-6 animate-pulse">🔍</div>
-                      <h2 className="text-xl font-bold mb-2">Reading Receipt...</h2>
-                      <p className="text-slate-400">{scanStatus || 'Processing image...'}</p>
-                      <div className="mt-4 w-48 h-2 bg-slate-800 rounded-full overflow-hidden mx-auto">
-                        <div className="h-full bg-gradient-to-r from-purple-600 to-pink-600 animate-pulse" style={{width: '60%'}}></div>
+                    /* Processing uploaded image */
+                    <div className="flex-1 flex flex-col items-center justify-center p-8">
+                      <div className="w-24 h-24 rounded-full bg-green-600/20 flex items-center justify-center mb-6">
+                        <div className="text-5xl animate-pulse">🔍</div>
+                      </div>
+                      <h2 className="text-xl font-bold text-white mb-2">Reading Receipt</h2>
+                      <p className="text-slate-400 text-center">{scanStatus || 'Processing...'}</p>
+                      <div className="mt-6 w-48 h-2 bg-slate-800 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-green-500 to-emerald-500 animate-pulse" style={{width: '70%'}}></div>
                       </div>
                     </div>
                   ) : (
-                    /* Initial state - choose scan or upload */
-                    <>
-                      <div className="text-6xl mb-6">📷</div>
-                      <h1 className="text-2xl font-bold mb-2">Add Receipt</h1>
-                      <p className="text-slate-400 text-center mb-8 px-4">
+                    /* Initial state - no camera yet */
+                    <div className="flex-1 flex flex-col items-center justify-center p-8">
+                      <div className="text-7xl mb-6">📷</div>
+                      <h2 className="text-2xl font-bold text-white mb-2">Add Receipt</h2>
+                      <p className="text-slate-400 text-center mb-8">
                         Take a photo or upload from gallery
                       </p>
                       
                       {cameraError && (
-                        <div className="bg-red-900/30 border border-red-700/50 rounded-xl p-3 mb-4 text-red-300 text-sm">
-                          {cameraError}
+                        <div className="bg-red-900/30 border border-red-700/50 rounded-xl p-4 mb-6 max-w-xs">
+                          <p className="text-red-300 text-sm text-center">{cameraError}</p>
                         </div>
                       )}
                       
@@ -2912,7 +2991,7 @@ Respond with ONLY the JSON object.
                           🖼️ Upload from Gallery
                         </button>
                       </div>
-                    </>
+                    </div>
                   )}
                 </div>
               ) : (
