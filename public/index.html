@@ -2397,21 +2397,33 @@ Respond with ONLY valid JSON:
         const clearRecoveryFlag = () => sessionStorage.removeItem('koha_has_recovered');
         
         // FIX #3: Recovery on mount using ScanSession
-        // ALWAYS load data from storage, but only show "Recovered!" message once
+        // ALWAYS load data from storage, but skip setState if data is already loaded
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing);
           if (editing) return;
           
           const alreadyRecovered = getRecoveryFlag();
-          
-          // Check for ScanSession - ALWAYS load data, but only show message if first time
           const session = ScanSession.get();
+          
           if (session && session.image) {
+            // Check if we already have this exact data loaded (prevents redundant setState calls)
+            const lastLoadedId = sessionStorage.getItem('koha_last_loaded_session');
+            const sessionId = session.savedAt?.toString() || 'unknown';
+            
+            if (alreadyRecovered && lastLoadedId === sessionId) {
+              // Data already loaded from this exact session - skip all setState calls
+              log('Skipping setState - data already loaded from session ' + sessionId);
+              return;
+            }
+            
+            // Mark this session as loaded
+            sessionStorage.setItem('koha_last_loaded_session', sessionId);
+            
             if (alreadyRecovered) {
-              log('Reloading data from ScanSession (silent - already showed message)');
+              log('Reloading data from ScanSession (session changed)');
             } else {
               log('Recovering from ScanSession, age=' + Math.round((Date.now() - session.savedAt) / 1000) + 's');
-              setRecoveryFlag(); // Only set flag on first recovery
+              setRecoveryFlag();
             }
             
             setPendingReceipt({
@@ -2685,20 +2697,31 @@ Respond with ONLY valid JSON:
           };
           if (editing && editingItem) updateExpense(editingItem.id, expenseData);
           else addExpense(expenseData);
-          ScanSession.clear(); // Clear session on save
-          clearRecoveryFlag(); // Clear recovery flag
+          ScanSession.clear();
+          clearRecoveryFlag();
+          sessionStorage.removeItem('koha_last_loaded_session');
+          sessionStorage.removeItem('koha_scanning');
           setScreen('expenses');
           setEditingItem(null);
         };
 
         const handleDelete = () => {
-          if (confirmDelete) { deleteExpense(editingItem.id); ScanSession.clear(); clearRecoveryFlag(); setScreen('expenses'); setEditingItem(null); }
+          if (confirmDelete) { 
+            deleteExpense(editingItem.id); 
+            ScanSession.clear(); 
+            clearRecoveryFlag(); 
+            sessionStorage.removeItem('koha_last_loaded_session');
+            setScreen('expenses'); 
+            setEditingItem(null); 
+          }
           else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000); }
         };
 
         const handleBack = () => {
-          ScanSession.clear(); // Clear session on back
-          clearRecoveryFlag(); // Clear recovery flag
+          ScanSession.clear();
+          clearRecoveryFlag();
+          sessionStorage.removeItem('koha_last_loaded_session');
+          sessionStorage.removeItem('koha_scanning');
           setScreen(editing ? 'expenses' : 'home');
           setEditingItem(null);
         };
