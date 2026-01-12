@@ -2499,8 +2499,16 @@ Respond with ONLY the JSON object.
         const [showReceipt, setShowReceipt] = useState(false);
         const [photoTaken, setPhotoTaken] = useState(editing ? true : false);
         const [scanStatus, setScanStatus] = useState('');
+        const [debugLog, setDebugLog] = useState('');
         const fileInputRef = useRef(null);
         const canvasRef = useRef(null);
+        
+        // Debug logger
+        const log = (msg) => {
+          const timestamp = new Date().toLocaleTimeString();
+          console.log('[SCAN] ' + msg);
+          setDebugLog(prev => prev + '\n[' + timestamp + '] ' + msg);
+        };
         
         // Get receipt (from pending scan or existing expense)
         const currentReceipt = pendingReceipt || (editing && editingItem?.receipt) || null;
@@ -2655,37 +2663,46 @@ Respond with ONLY the JSON object.
         };
 
         const handleScan = async (e) => {
+          log('--- SCAN STARTED ---');
+          log('Event type: ' + e?.type);
+          log('Target: ' + e?.target?.tagName);
+          
           try {
             const file = e.target.files?.[0];
+            log('Files array length: ' + (e.target.files?.length || 0));
+            
             if (!file) {
-              console.log('No file selected');
+              log('ERROR: No file in event');
               return;
             }
             
-            console.log('File selected:', file.name, file.size);
+            log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB, type: ' + file.type + ')');
             setScanningLocal(true);
             setScanStatus('Loading image...');
             setLastScanInfo(null);
             
             const reader = new FileReader();
+            
             reader.onerror = (error) => {
-              console.error('FileReader error:', error);
+              log('ERROR: FileReader failed: ' + error);
               setScanningLocal(false);
               setScanStatus('');
-              setPhotoTaken(true); // Still let them enter manually
-              alert('Error reading image. Please try again or enter details manually.');
+              setPhotoTaken(true);
             };
             
             reader.onload = async () => {
+              log('FileReader onload fired');
               try {
-                console.log('File loaded, processing...');
                 const base64 = reader.result.split(',')[1];
+                log('Base64 length: ' + base64.length + ' chars');
                 
                 setScanStatus('Compressing...');
+                log('Starting compression...');
                 const compressed = await compressImage(base64, 1200, 0.8);
-                console.log('Compressed:', Math.round(compressed.length / 1024) + 'KB');
+                log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
                 
                 // Save the image first regardless of AI result
+                log('Saving pending receipt...');
                 setPendingReceipt({
                   originalImage: compressed,
                   scannedAt: new Date().toISOString(),
@@ -2694,12 +2711,14 @@ Respond with ONLY the JSON object.
                 });
                 
                 setScanStatus('Reading with AI...');
+                log('Calling scanReceipt API...');
                 
                 try {
                   const result = await scanReceipt(compressed);
-                  console.log('AI result:', result);
+                  log('AI result: ' + JSON.stringify(result).substring(0, 200));
                   
                   if (result && result.total) {
+                    log('SUCCESS: Got total=' + result.total + ', vendor=' + result.vendor);
                     setAmount(result.total.toString());
                     if (result.date) setDate(result.date);
                     if (result.category) setCategory(result.category);
@@ -2718,34 +2737,36 @@ Respond with ONLY the JSON object.
                     
                     setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
                   } else {
+                    log('WARN: AI returned no total');
                     setLastScanInfo({ error: true, message: 'AI could not read receipt. Enter details manually.' });
                   }
                 } catch (aiError) {
-                  console.error('AI error:', aiError);
+                  log('ERROR: AI call failed: ' + aiError.message);
                   setLastScanInfo({ error: true, message: 'AI unavailable. Enter details manually.' });
                 }
                 
+                log('Setting photoTaken=true, scanningLocal=false');
                 setPhotoTaken(true);
                 setScanningLocal(false);
                 setScanStatus('');
+                log('--- SCAN COMPLETE ---');
                 setTimeout(() => setLastScanInfo(null), 8000);
                 
               } catch (processError) {
-                console.error('Processing error:', processError);
+                log('ERROR: Processing failed: ' + processError.message);
                 setScanningLocal(false);
                 setScanStatus('');
                 setPhotoTaken(true);
-                alert('Error processing image. Please enter details manually.');
               }
             };
             
+            log('Calling reader.readAsDataURL...');
             reader.readAsDataURL(file);
             
           } catch (error) {
-            console.error('handleScan error:', error);
+            log('ERROR: Outer catch: ' + error.message);
             setScanningLocal(false);
             setScanStatus('');
-            alert('Something went wrong. Please try again.');
           }
         };
 
@@ -2831,7 +2852,7 @@ Respond with ONLY the JSON object.
                       <div className="w-full max-w-xs space-y-3">
                         <button 
                           type="button"
-                          onClick={(e) => { e.preventDefault(); fileInputRef.current?.click(); }}
+                          onClick={(e) => { e.preventDefault(); log('Take Photo clicked'); fileInputRef.current?.click(); }}
                           className="w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl text-lg font-bold flex items-center justify-center gap-3"
                         >
                           📸 Take Photo
@@ -2839,7 +2860,7 @@ Respond with ONLY the JSON object.
                         
                         <button 
                           type="button"
-                          onClick={(e) => { e.preventDefault(); document.getElementById('galleryInput')?.click(); }}
+                          onClick={(e) => { e.preventDefault(); log('Gallery clicked'); document.getElementById('galleryInput')?.click(); }}
                           className="w-full py-4 bg-slate-800 rounded-2xl text-lg font-medium text-slate-300 flex items-center justify-center gap-3"
                         >
                           🖼️ Choose from Photos
@@ -2853,6 +2874,25 @@ Respond with ONLY the JSON object.
                           Skip - enter manually
                         </button>
                       </div>
+                      
+                      {/* Debug Log */}
+                      {debugLog && (
+                        <div className="w-full max-w-xs mt-6">
+                          <p className="text-slate-500 text-xs mb-2">📋 Debug Log (copy if something's wrong)</p>
+                          <textarea 
+                            readOnly 
+                            value={debugLog}
+                            className="w-full bg-slate-900 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-32"
+                            onClick={(e) => e.target.select()}
+                          />
+                          <button 
+                            onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(debugLog); }}
+                            className="w-full py-2 bg-slate-800 rounded-lg text-sm mt-2"
+                          >
+                            📋 Copy Log
+                          </button>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
