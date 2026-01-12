@@ -39,16 +39,20 @@ export default async (req) => {
 
     // OCR: Extract text from receipt image
     if (action === "ocr") {
-      const ocrResponse = await fetch('https://router.huggingface.co/hf-inference/models/naver-clova-ix/donut-base-finetuned-cord-v2', {
+      // Convert base64 to binary using atob and Uint8Array
+      const binaryString = atob(data.image);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      const ocrResponse = await fetch('https://router.huggingface.co/models/naver-clova-ix/donut-base-finetuned-cord-v2', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${HF_TOKEN}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'image/jpeg'
         },
-        body: JSON.stringify({
-          inputs: data.image,
-          options: { wait_for_model: true }
-        })
+        body: bytes
       });
 
       if (!ocrResponse.ok) {
@@ -68,7 +72,7 @@ export default async (req) => {
 
     // Parse or Validate: Use Mistral
     if (action === "parse" || action === "validate") {
-      const parseResponse = await fetch('https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.2', {
+      const parseResponse = await fetch('https://router.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${HF_TOKEN}`,
