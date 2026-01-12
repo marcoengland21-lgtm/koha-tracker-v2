@@ -149,18 +149,8 @@
     };
 
     // Copy to clipboard with iOS fallback
-    const copyToClipboard = async (text) => {
-      try {
-        // Try modern clipboard API first
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(text);
-          return true;
-        }
-      } catch (e) {
-        console.log('Clipboard API failed, trying fallback');
-      }
-      
-      // Fallback for iOS Safari and older browsers
+    const copyToClipboard = (text) => {
+      // Try fallback method first (more reliable on iOS)
       try {
         const textarea = document.createElement('textarea');
         textarea.value = text;
@@ -169,15 +159,32 @@
         textarea.style.top = '0';
         textarea.setAttribute('readonly', '');
         document.body.appendChild(textarea);
+        textarea.focus();
         textarea.select();
         textarea.setSelectionRange(0, textarea.value.length); // iOS specific
         const success = document.execCommand('copy');
         document.body.removeChild(textarea);
-        return success;
+        if (success) {
+          alert('Copied to clipboard!');
+          return true;
+        }
       } catch (e) {
-        console.error('Copy failed:', e);
-        return false;
+        console.log('execCommand failed:', e);
       }
+      
+      // Fallback: try modern API (less reliable on iOS in some contexts)
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          alert('Copied to clipboard!');
+        }).catch(e => {
+          console.error('Clipboard API failed:', e);
+          alert('Copy failed - try selecting the text manually');
+        });
+        return true;
+      }
+      
+      alert('Copy failed - try selecting the text manually');
+      return false;
     };
 
     // HuggingFace API
@@ -2352,32 +2359,85 @@ Respond with ONLY valid JSON:
       // Add Expense Screen - FIXED but keeping original UI flow
       // Photo required first, iOS picker (camera/photos/files)
       const AddExpense = ({ editing = false }) => {
-        const [amount, setAmount] = useState(editing && editingItem ? editingItem.amount.toString() : '');
-        const [category, setCategory] = useState(editing && editingItem ? editingItem.category : '');
-        const [description, setDescription] = useState(editing && editingItem ? editingItem.description || '' : '');
-        const [method, setMethod] = useState(editing && editingItem ? editingItem.method : 'cash');
-        const [date, setDate] = useState(editing && editingItem ? editingItem.date : new Date().toISOString().split('T')[0]);
+        // FIX: Initialize state from ScanSession so form survives remounts even when skipping setState
+        const initSession = useMemo(() => {
+          if (editing) return null;
+          try {
+            const raw = localStorage.getItem('koha_scan_session');
+            return raw ? JSON.parse(raw) : null;
+          } catch { return null; }
+        }, [editing]);
+        
+        const [amount, setAmount] = useState(() => {
+          if (editing && editingItem) return editingItem.amount.toString();
+          return initSession?.total?.toString() || '';
+        });
+        const [category, setCategory] = useState(() => {
+          if (editing && editingItem) return editingItem.category;
+          return initSession?.category || '';
+        });
+        const [description, setDescription] = useState(() => {
+          if (editing && editingItem) return editingItem.description || '';
+          return initSession?.vendor || '';
+        });
+        const [method, setMethod] = useState(() => {
+          if (editing && editingItem) return editingItem.method;
+          if (initSession?.paymentMethod) return initSession.paymentMethod === 'Cash' ? 'cash' : 'bank';
+          return 'cash';
+        });
+        const [date, setDate] = useState(() => {
+          if (editing && editingItem) return editingItem.date;
+          return initSession?.date || new Date().toISOString().split('T')[0];
+        });
         const [showCategories, setShowCategories] = useState(false);
         const [confirmDelete, setConfirmDelete] = useState(false);
         // FIX: Initialize scanning state from sessionStorage to persist across remounts
         const [scanningLocal, setScanningLocal] = useState(() => sessionStorage.getItem('koha_scanning') === 'true');
         const [scanProgress, setScanProgress] = useState(() => parseInt(sessionStorage.getItem('koha_scan_progress') || '0'));
         const [lastScanInfo, setLastScanInfo] = useState(null);
-        const [pendingReceipt, setPendingReceipt] = useState(null);
+        const [pendingReceipt, setPendingReceipt] = useState(() => {
+          if (editing && editingItem?.receipt) return editingItem.receipt;
+          if (initSession?.image) return {
+            originalImage: initSession.image,
+            vendor: initSession.vendor || '',
+            total: initSession.total || 0,
+            items: initSession.items || [],
+            rawText: initSession.rawText || '',
+            subtotal: initSession.subtotal,
+            gst: initSession.gst,
+            paymentMethod: initSession.paymentMethod
+          };
+          return null;
+        });
         const [showReceipt, setShowReceipt] = useState(false);
-        const [photoTaken, setPhotoTaken] = useState(editing ? true : false);
+        const [photoTaken, setPhotoTaken] = useState(() => {
+          if (editing) return true;
+          return !!initSession?.image;
+        });
         const [scanStatus, setScanStatus] = useState(() => sessionStorage.getItem('koha_scan_status') || '');
         const [debugLog, setDebugLog] = useState(() => localStorage.getItem('scan_debug_log') || '');
         const [showDebugLog, setShowDebugLog] = useState(false);
-        const [showReceiptDetails, setShowReceiptDetails] = useState(false);
+        const [showReceiptDetails, setShowReceiptDetails] = useState(() => {
+          if (editing && (editingItem?.subtotal || editingItem?.gst)) return true;
+          return !!(initSession?.subtotal || initSession?.gst || initSession?.paymentMethod);
+        });
         
         // Receipt detail fields
-        const [subtotal, setSubtotal] = useState(editing && editingItem?.subtotal ? editingItem.subtotal.toString() : '');
-        const [gst, setGst] = useState(editing && editingItem?.gst ? editingItem.gst.toString() : '');
+        const [subtotal, setSubtotal] = useState(() => {
+          if (editing && editingItem?.subtotal) return editingItem.subtotal.toString();
+          return initSession?.subtotal?.toString() || '';
+        });
+        const [gst, setGst] = useState(() => {
+          if (editing && editingItem?.gst) return editingItem.gst.toString();
+          return initSession?.gst?.toString() || '';
+        });
         const [discount, setDiscount] = useState(editing && editingItem?.discount ? editingItem.discount.toString() : '');
         const [cashOut, setCashOut] = useState(editing && editingItem?.cashOut ? editingItem.cashOut.toString() : '');
         const [change, setChange] = useState(editing && editingItem?.change ? editingItem.change.toString() : '');
-        const [paymentMethod, setPaymentMethod] = useState(editing && editingItem?.paymentMethod || '');
+        const [paymentMethod, setPaymentMethod] = useState(() => {
+          if (editing && editingItem?.paymentMethod) return editingItem.paymentMethod;
+          return initSession?.paymentMethod || '';
+        });
         const [cardLastFour, setCardLastFour] = useState(editing && editingItem?.cardLastFour || '');
         
         const fileInputRef = useRef(null);
@@ -2773,7 +2833,7 @@ Respond with ONLY valid JSON:
                             <div className="flex justify-between items-center mb-3"><h3 className="text-white font-bold">🐛 Debug Log</h3><button onClick={() => setShowDebugLog(false)} className="text-slate-400 text-xl">×</button></div>
                             <textarea readOnly value={debugLog || '(empty)'} className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-48" onClick={(e) => e.target.select()} />
                             <div className="flex gap-2 mt-3">
-                              <button onClick={async (e) => { e.preventDefault(); await copyToClipboard(debugLog); }} className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium">📋 Copy</button>
+                              <button onClick={(e) => { e.preventDefault(); copyToClipboard(debugLog); }} className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium">📋 Copy</button>
                               <button onClick={(e) => { e.preventDefault(); clearLog(); }} className="flex-1 py-2 bg-slate-700 rounded-lg text-sm">🗑️ Clear</button>
                             </div>
                           </div>
@@ -2918,7 +2978,7 @@ Respond with ONLY valid JSON:
                         <div className="flex justify-between items-center mb-3"><h3 className="text-white font-bold">🐛 Debug Log</h3><button onClick={() => setShowDebugLog(false)} className="text-slate-400 text-xl">×</button></div>
                         <textarea readOnly value={debugLog || '(empty)'} className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-64" onClick={(e) => e.target.select()} />
                         <div className="flex gap-2 mt-3">
-                          <button onClick={async (e) => { e.preventDefault(); await copyToClipboard(debugLog); }} className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium">📋 Copy</button>
+                          <button onClick={(e) => { e.preventDefault(); copyToClipboard(debugLog); }} className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium">📋 Copy</button>
                           <button onClick={(e) => { e.preventDefault(); clearLog(); }} className="flex-1 py-2 bg-slate-700 rounded-lg text-sm">🗑️ Clear</button>
                         </div>
                       </div>
