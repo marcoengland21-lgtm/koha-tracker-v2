@@ -2359,13 +2359,14 @@ Respond with ONLY valid JSON:
         const [date, setDate] = useState(editing && editingItem ? editingItem.date : new Date().toISOString().split('T')[0]);
         const [showCategories, setShowCategories] = useState(false);
         const [confirmDelete, setConfirmDelete] = useState(false);
-        const [scanningLocal, setScanningLocal] = useState(false);
-        const [scanProgress, setScanProgress] = useState(0);
+        // FIX: Initialize scanning state from sessionStorage to persist across remounts
+        const [scanningLocal, setScanningLocal] = useState(() => sessionStorage.getItem('koha_scanning') === 'true');
+        const [scanProgress, setScanProgress] = useState(() => parseInt(sessionStorage.getItem('koha_scan_progress') || '0'));
         const [lastScanInfo, setLastScanInfo] = useState(null);
         const [pendingReceipt, setPendingReceipt] = useState(null);
         const [showReceipt, setShowReceipt] = useState(false);
         const [photoTaken, setPhotoTaken] = useState(editing ? true : false);
-        const [scanStatus, setScanStatus] = useState('');
+        const [scanStatus, setScanStatus] = useState(() => sessionStorage.getItem('koha_scan_status') || '');
         const [debugLog, setDebugLog] = useState(() => localStorage.getItem('scan_debug_log') || '');
         const [showDebugLog, setShowDebugLog] = useState(false);
         const [showReceiptDetails, setShowReceiptDetails] = useState(false);
@@ -2381,9 +2382,6 @@ Respond with ONLY valid JSON:
         
         const fileInputRef = useRef(null);
         
-        // FIX: Track if we've already recovered this mount to prevent repeated recovery causing glitches
-        const hasRecoveredRef = useRef(false);
-        
         const log = (msg) => {
           const timestamp = new Date().toLocaleTimeString();
           const entry = '[' + timestamp + '] ' + msg;
@@ -2392,21 +2390,27 @@ Respond with ONLY valid JSON:
         };
         const clearLog = () => { localStorage.removeItem('scan_debug_log'); setDebugLog(''); };
         
-        // FIX #3: Recovery on mount using ScanSession (with debounce to prevent glitchy multi-recovery)
+        // FIX: Use sessionStorage (not ref) to track recovery across component remounts
+        // Refs reset on remount, but sessionStorage persists
+        const getRecoveryFlag = () => sessionStorage.getItem('koha_has_recovered') === 'true';
+        const setRecoveryFlag = () => sessionStorage.setItem('koha_has_recovered', 'true');
+        const clearRecoveryFlag = () => sessionStorage.removeItem('koha_has_recovered');
+        
+        // FIX #3: Recovery on mount using ScanSession (with debounce via sessionStorage)
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing);
           if (editing) return;
           
-          // CRITICAL: Skip if we've already recovered to prevent glitchy multiple state updates
-          if (hasRecoveredRef.current) {
-            log('Skipping recovery - already recovered this session');
+          // CRITICAL: Skip if we've already recovered (persists across remounts!)
+          if (getRecoveryFlag()) {
+            log('Skipping recovery - already recovered (sessionStorage flag set)');
             return;
           }
           
           // Check for ScanSession first (new unified storage)
           const session = ScanSession.get();
           if (session && session.image) {
-            hasRecoveredRef.current = true; // Mark as recovered BEFORE state updates
+            setRecoveryFlag(); // Mark as recovered BEFORE state updates - persists across remounts!
             log('Recovering from ScanSession, age=' + Math.round((Date.now() - session.savedAt) / 1000) + 's');
             
             setPendingReceipt({
@@ -2449,7 +2453,7 @@ Respond with ONLY valid JSON:
             try {
               const result = JSON.parse(pendingResult);
               if (Date.now() - (result.savedAt || 0) < 60000) {
-                hasRecoveredRef.current = true; // Mark as recovered
+                setRecoveryFlag(); // Mark as recovered
                 log('Recovering from old pending_scan_result');
                 if (result.total) setAmount(result.total.toString());
                 if (result.vendor) setDescription(result.vendor);
@@ -2490,11 +2494,19 @@ Respond with ONLY valid JSON:
           return () => document.removeEventListener('visibilitychange', handleVisibility);
         }, [pendingReceipt, amount, description, category, date, subtotal, gst, paymentMethod]);
 
+        // FIX: Persist scanning state to sessionStorage so overlay survives remounts
+        useEffect(() => {
+          sessionStorage.setItem('koha_scanning', scanningLocal ? 'true' : 'false');
+          sessionStorage.setItem('koha_scan_progress', scanProgress.toString());
+          sessionStorage.setItem('koha_scan_status', scanStatus);
+        }, [scanningLocal, scanProgress, scanStatus]);
+
         // FIX #7: Save breadcrumb BEFORE opening camera
         const handleOpenCamera = (e) => {
           e.preventDefault();
           log('Opening camera - saving breadcrumb first');
           sessionStorage.setItem('return_to_screen', 'addExpense');
+          clearRecoveryFlag(); // Clear old recovery flag for new scan
           ScanSession.save({ cameraOpenedAt: Date.now() });
           fileInputRef.current?.click();
         };
@@ -2528,7 +2540,7 @@ Respond with ONLY valid JSON:
               
               // Save immediately with ScanSession
               ScanSession.save({ image: compressed, cameraOpenedAt: Date.now() });
-              hasRecoveredRef.current = true; // Mark as having data to prevent re-recovery glitches
+              setRecoveryFlag(); // Mark as having data to prevent re-recovery glitches
               
               // Update state directly (no reload!)
               setPendingReceipt({
@@ -2668,17 +2680,19 @@ Respond with ONLY valid JSON:
           if (editing && editingItem) updateExpense(editingItem.id, expenseData);
           else addExpense(expenseData);
           ScanSession.clear(); // Clear session on save
+          clearRecoveryFlag(); // Clear recovery flag
           setScreen('expenses');
           setEditingItem(null);
         };
 
         const handleDelete = () => {
-          if (confirmDelete) { deleteExpense(editingItem.id); ScanSession.clear(); setScreen('expenses'); setEditingItem(null); }
+          if (confirmDelete) { deleteExpense(editingItem.id); ScanSession.clear(); clearRecoveryFlag(); setScreen('expenses'); setEditingItem(null); }
           else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000); }
         };
 
         const handleBack = () => {
           ScanSession.clear(); // Clear session on back
+          clearRecoveryFlag(); // Clear recovery flag
           setScreen(editing ? 'expenses' : 'home');
           setEditingItem(null);
         };
