@@ -213,6 +213,9 @@
       { id: 'misc', sm: 'Isi Mea', mi: 'Ētahi Atu', en: 'Other', icon: '📦', group: 'other', keywords: [] }
     ];
 
+    // Family members who might pay out of pocket and need reimbursement
+    const FAMILY_MEMBERS = ['Martha', 'Samason', 'Kelynge', 'Nourah', 'Marco', 'Ben'];
+
     // Gift/Koha categories
     const GIFT_CATEGORIES = [
       { id: 'aiga', sm: "Āiga", mi: 'Whānau', en: 'Family', icon: '👨‍👩‍👧‍👦', color: '#ec4899', keywords: ['aunty', 'auntie', 'uncle', 'nana', 'grandma', 'grandpa', 'papa', 'mama', 'mum', 'dad', 'brother', 'sister', 'cousin', 'niece', 'nephew', 'son', 'daughter', 'in-law', 'family', 'whānau', 'aiga', 'tina', 'tama'] },
@@ -2440,7 +2443,43 @@ Respond with ONLY valid JSON:
         });
         const [cardLastFour, setCardLastFour] = useState(editing && editingItem?.cardLastFour || '');
         
+        // Reimbursement tracking
+        const [paidBy, setPaidBy] = useState(() => {
+          if (editing && editingItem?.paidBy) return editingItem.paidBy;
+          return 'fund'; // default: paid from funeral fund
+        });
+        const [paidByPerson, setPaidByPerson] = useState(() => {
+          if (editing && editingItem?.paidByPerson) {
+            // Check if it's a known family member or a custom name
+            if (FAMILY_MEMBERS.includes(editingItem.paidByPerson)) {
+              return editingItem.paidByPerson;
+            }
+            return 'Other'; // Custom name - will be in customPerson
+          }
+          return '';
+        });
+        const [customPerson, setCustomPerson] = useState(() => {
+          if (editing && editingItem?.paidByPerson && !FAMILY_MEMBERS.includes(editingItem.paidByPerson)) {
+            return editingItem.paidByPerson;
+          }
+          return '';
+        });
+        const [reimbursed, setReimbursed] = useState(() => {
+          if (editing && editingItem?.reimbursed) return editingItem.reimbursed;
+          return false;
+        });
+        
         const fileInputRef = useRef(null);
+        
+        // FIX: Wrapper to set scanning state AND sessionStorage atomically (prevents race condition on iOS remount)
+        const setScanning = (value, progress = 0, status = '') => {
+          sessionStorage.setItem('koha_scanning', value ? 'true' : 'false');
+          sessionStorage.setItem('koha_scan_progress', progress.toString());
+          sessionStorage.setItem('koha_scan_status', status);
+          setScanningLocal(value);
+          setScanProgress(progress);
+          setScanStatus(status);
+        };
         
         const log = (msg) => {
           const timestamp = new Date().toLocaleTimeString();
@@ -2572,13 +2611,6 @@ Respond with ONLY valid JSON:
           return () => document.removeEventListener('visibilitychange', handleVisibility);
         }, [pendingReceipt, amount, description, category, date, subtotal, gst, paymentMethod]);
 
-        // FIX: Persist scanning state to sessionStorage so overlay survives remounts
-        useEffect(() => {
-          sessionStorage.setItem('koha_scanning', scanningLocal ? 'true' : 'false');
-          sessionStorage.setItem('koha_scan_progress', scanProgress.toString());
-          sessionStorage.setItem('koha_scan_status', scanStatus);
-        }, [scanningLocal, scanProgress, scanStatus]);
-
         // FIX #7: Save breadcrumb BEFORE opening camera - but DON'T destroy existing session data
         const handleOpenCamera = (e) => {
           e.preventDefault();
@@ -2597,24 +2629,20 @@ Respond with ONLY valid JSON:
             if (!file) { log('ERROR: No file'); return; }
             
             log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB)');
-            setScanningLocal(true);
-            setScanProgress(20);
-            setScanStatus('Reading photo...');
+            setScanning(true, 20, 'Reading photo...');
             
             const reader = new FileReader();
             reader.onload = async () => {
               const base64 = reader.result.split(',')[1];
               log('Read file: ' + Math.round(base64.length/1024) + 'KB');
               
-              setScanProgress(40);
-              setScanStatus('Compressing...');
+              setScanning(true, 40, 'Compressing...');
               
               // FIX #2: Use improved compression
               const compressed = await compressForStorage(base64, 400);
               log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
               
-              setScanProgress(60);
-              setScanStatus('Saving...');
+              setScanning(true, 60, 'Saving...');
               
               // Save immediately with ScanSession
               ScanSession.save({ image: compressed, cameraOpenedAt: Date.now() });
@@ -2629,24 +2657,22 @@ Respond with ONLY valid JSON:
               });
               setPhotoTaken(true);
               
-              setScanProgress(100);
-              setScanStatus('Photo ready!');
+              setScanning(true, 100, 'Photo ready!');
               setLastScanInfo({ success: true, message: 'Photo captured! Tap "Autofill with AI" to scan.' });
               
-              setScanningLocal(false);
-              setTimeout(() => { setScanProgress(0); setScanStatus(''); }, 1000);
+              setTimeout(() => { setScanning(false, 0, ''); }, 1000);
               log('Photo saved to state, ready for AI scan');
             };
             
             reader.onerror = () => {
               log('FileReader error');
-              setScanningLocal(false);
+              setScanning(false, 0, '');
             };
             
             reader.readAsDataURL(file);
           } catch (error) {
             log('ERROR: ' + error.message);
-            setScanningLocal(false);
+            setScanning(false, 0, '');
           }
         };
         
@@ -2656,20 +2682,15 @@ Respond with ONLY valid JSON:
           if (!pendingReceipt?.originalImage) { log('ERROR: No image'); return; }
           
           log('Image size: ' + Math.round(pendingReceipt.originalImage.length / 1024) + 'KB');
-          setScanningLocal(true);
-          setScanProgress(0);
-          setScanStatus('Initializing...');
+          setScanning(true, 0, 'Initializing...');
           
           try {
             const result = await scanReceipt(pendingReceipt.originalImage, (progress) => {
-              setScanProgress(progress);
-              if (progress < 30) setScanStatus('Reading text...');
-              else if (progress < 70) setScanStatus('Processing...');
-              else setScanStatus('Analyzing...');
+              const status = progress < 30 ? 'Reading text...' : progress < 70 ? 'Processing...' : 'Analyzing...';
+              setScanning(true, progress, status);
             });
             
-            setScanProgress(100);
-            setScanStatus('Complete!');
+            setScanning(true, 100, 'Complete!');
             
             if (result && result.total) {
               log('SUCCESS: total=' + result.total + ', vendor=' + result.vendor);
@@ -2696,9 +2717,56 @@ Respond with ONLY valid JSON:
             setLastScanInfo({ error: true, message: 'Scan failed: ' + err.message });
           }
           
-          setScanningLocal(false);
-          setTimeout(() => { setScanProgress(0); setScanStatus(''); }, 1000);
+          setTimeout(() => setScanning(false, 0, ''), 1000);
           setTimeout(() => setLastScanInfo(null), 8000);
+        };
+        
+        // Add receipt photo only (no AI scan) - for editing existing expenses
+        const handleAddReceiptOnly = async (e) => {
+          log('--- ADD RECEIPT ONLY ---');
+          try {
+            const file = e.target.files?.[0];
+            if (!file) { log('ERROR: No file'); return; }
+            
+            log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB)');
+            setScanning(true, 20, 'Reading photo...');
+            
+            const reader = new FileReader();
+            reader.onload = async () => {
+              const base64 = reader.result.split(',')[1];
+              log('Read file: ' + Math.round(base64.length/1024) + 'KB');
+              
+              setScanning(true, 60, 'Compressing...');
+              const compressed = await compressForStorage(base64, 400);
+              log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
+              
+              // Just attach the photo, no AI scan
+              setPendingReceipt({
+                originalImage: compressed,
+                scannedAt: new Date().toISOString(),
+                vendor: description || '', // Use existing description
+                total: parseFloat(amount) || 0
+              });
+              setPhotoTaken(true);
+              
+              setScanning(true, 100, 'Photo added!');
+              setLastScanInfo({ success: true, message: 'Receipt photo attached!' });
+              
+              setTimeout(() => setScanning(false, 0, ''), 800);
+              setTimeout(() => setLastScanInfo(null), 5000);
+              log('Receipt photo attached');
+            };
+            
+            reader.onerror = () => {
+              log('FileReader error');
+              setScanning(false, 0, '');
+            };
+            
+            reader.readAsDataURL(file);
+          } catch (error) {
+            log('ERROR: ' + error.message);
+            setScanning(false, 0, '');
+          }
         };
         
         const currentReceipt = pendingReceipt || (editing && editingItem?.receipt) || null;
@@ -2748,12 +2816,21 @@ Respond with ONLY valid JSON:
         // FIX #8: Clear session on submit/back
         const handleSubmit = () => {
           if (!amount || !category) return;
+          // Determine the person who paid out of pocket
+          const actualPaidByPerson = paidBy === 'outOfPocket' 
+            ? (paidByPerson === 'Other' ? customPerson.trim() : paidByPerson)
+            : '';
+          
           const expenseData = { 
             amount: parseFloat(amount), category, description: description.trim(), method, date,
             receipt: pendingReceipt || (editing && editingItem?.receipt) || null,
             ...(subtotal && { subtotal: parseFloat(subtotal) }),
             ...(gst && { gst: parseFloat(gst) }),
-            ...(paymentMethod && { paymentMethod })
+            ...(paymentMethod && { paymentMethod }),
+            // Reimbursement tracking
+            paidBy,
+            ...(actualPaidByPerson && { paidByPerson: actualPaidByPerson }),
+            ...(paidBy === 'outOfPocket' && { reimbursed })
           };
           if (editing && editingItem) updateExpense(editingItem.id, expenseData);
           else addExpense(expenseData);
@@ -2852,6 +2929,14 @@ Respond with ONLY valid JSON:
                         <input ref={fileInputRef} type="file" accept="image/*" onChange={handleScan} className="hidden" />
                         <button onClick={() => fileInputRef.current?.click()} disabled={scanningLocal || scanning} className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-xl text-sm font-medium disabled:opacity-50">
                           {scanningLocal || scanning ? <><span className="spin">🔄</span> Scanning...</> : <>📷 Rescan</>}
+                        </button>
+                      </>
+                    )}
+                    {editing && !currentReceipt && (
+                      <>
+                        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleAddReceiptOnly} className="hidden" />
+                        <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-xl text-sm font-medium">
+                          📷 Add Receipt
                         </button>
                       </>
                     )}
@@ -2960,6 +3045,63 @@ Respond with ONLY valid JSON:
                       <button onClick={() => setMethod('bank')} className={`py-3 rounded-xl font-medium ${method === 'bank' ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400'}`}>🏦 Bank</button>
                     </div>
                   </div>
+
+                  {/* Reimbursement tracking */}
+                  <div className="mb-4">
+                    <label className="text-slate-400 text-sm mb-2 block">Payment Source</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button onClick={() => { setPaidBy('fund'); setPaidByPerson(''); setCustomPerson(''); }} className={`py-3 rounded-xl font-medium ${paidBy === 'fund' ? 'bg-emerald-600 text-white' : 'bg-slate-900 text-slate-400'}`}>🏦 From Fund</button>
+                      <button onClick={() => setPaidBy('outOfPocket')} className={`py-3 rounded-xl font-medium ${paidBy === 'outOfPocket' ? 'bg-amber-600 text-white' : 'bg-slate-900 text-slate-400'}`}>💸 Out of Pocket</button>
+                    </div>
+                  </div>
+
+                  {paidBy === 'outOfPocket' && (
+                    <div className="mb-4 bg-amber-950/30 border border-amber-900/50 rounded-xl p-4">
+                      <label className="text-amber-400 text-sm mb-3 block font-medium">Who paid?</label>
+                      <div className="flex flex-wrap gap-2 mb-3">
+                        {FAMILY_MEMBERS.map(name => (
+                          <button 
+                            key={name}
+                            onClick={() => { setPaidByPerson(name); setCustomPerson(''); }}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${paidByPerson === name ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
+                          >
+                            {name}
+                          </button>
+                        ))}
+                        <button 
+                          onClick={() => setPaidByPerson('Other')}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${paidByPerson === 'Other' ? 'bg-amber-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}
+                        >
+                          Other...
+                        </button>
+                      </div>
+                      
+                      {paidByPerson === 'Other' && (
+                        <input 
+                          type="text" 
+                          value={customPerson} 
+                          onChange={(e) => setCustomPerson(e.target.value)} 
+                          placeholder="Enter name..." 
+                          className="w-full bg-slate-800 rounded-lg px-4 py-2 text-white placeholder-slate-500 outline-none mb-3"
+                        />
+                      )}
+
+                      {/* Reimbursed checkbox - show always for out of pocket */}
+                      {paidByPerson && (
+                        <label className="flex items-center gap-3 mt-3 cursor-pointer">
+                          <input 
+                            type="checkbox" 
+                            checked={reimbursed} 
+                            onChange={(e) => setReimbursed(e.target.checked)}
+                            className="w-5 h-5 rounded bg-slate-800 border-slate-600 text-emerald-600 focus:ring-emerald-500 focus:ring-offset-0"
+                          />
+                          <span className={reimbursed ? 'text-emerald-400' : 'text-amber-300'}>
+                            {reimbursed ? '✓ Reimbursed' : 'Needs reimbursement'}
+                          </span>
+                        </label>
+                      )}
+                    </div>
+                  )}
 
                   <div className="mb-6">
                     <label className="text-slate-400 text-sm mb-2 block">Date</label>
@@ -3071,11 +3213,14 @@ Respond with ONLY valid JSON:
           let result = [...expenses];
           if (filter === 'cash' || filter === 'bank') result = result.filter(e => e.method === filter);
           if (filter === 'receipts') result = result.filter(e => !!e.receipt);
+          if (filter === 'reimburse') result = result.filter(e => e.paidBy === 'outOfPocket' && !e.reimbursed);
           if (search.trim()) result = result.filter(e => e.description?.toLowerCase().includes(search.toLowerCase()) || getCategoryById(e.category).en.toLowerCase().includes(search.toLowerCase()));
           return result.sort((a, b) => new Date(b.date) - new Date(a.date));
         }, [expenses, filter, search]);
         
         const receiptCount = useMemo(() => expenses.filter(e => !!e.receipt).length, [expenses]);
+        const needsReimbursementCount = useMemo(() => expenses.filter(e => e.paidBy === 'outOfPocket' && !e.reimbursed).length, [expenses]);
+        const totalNeedsReimbursement = useMemo(() => expenses.filter(e => e.paidBy === 'outOfPocket' && !e.reimbursed).reduce((sum, e) => sum + e.amount, 0), [expenses]);
 
         return (
           <div className="min-h-screen bg-slate-950 text-white pb-24">
@@ -3090,6 +3235,15 @@ Respond with ONLY valid JSON:
                   <button onClick={() => setScreen('addExpense')} className="w-10 h-10 bg-orange-600 rounded-full flex items-center justify-center text-xl">+</button>
                 </div>
               </div>
+              
+              {/* Reimbursement summary banner */}
+              {needsReimbursementCount > 0 && (
+                <button onClick={() => setFilter(filter === 'reimburse' ? 'all' : 'reimburse')} className={`w-full mb-4 p-3 rounded-xl flex justify-between items-center transition-all ${filter === 'reimburse' ? 'bg-amber-600 text-white' : 'bg-amber-950/40 border border-amber-900/50'}`}>
+                  <span className={filter === 'reimburse' ? 'text-white' : 'text-amber-400'}>💸 Needs reimbursement ({needsReimbursementCount})</span>
+                  <span className={`font-bold ${filter === 'reimburse' ? 'text-white' : 'text-amber-400'}`}>{fmt(totalNeedsReimbursement)}</span>
+                </button>
+              )}
+              
               <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white placeholder-slate-600 outline-none mb-4" />
               <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
                 {[{ id: 'all', label: 'All' }, { id: 'cash', label: '💵' }, { id: 'bank', label: '🏦' }, { id: 'receipts', label: `🧾 ${receiptCount}` }].map(f => (
@@ -3123,8 +3277,9 @@ Respond with ONLY valid JSON:
                   const result = validationResults[e.id];
                   const flagged = result && !result.correct && !result.dismissed && !result.applied;
                   const hasReceipt = !!e.receipt;
+                  const needsReimbursement = e.paidBy === 'outOfPocket' && !e.reimbursed;
                   return (
-                    <div key={e.id} onClick={() => { setEditingItem(e); setScreen('editExpense'); }} className={`bg-slate-900 rounded-xl p-4 active:bg-slate-800 ${flagged ? 'border border-amber-500/50' : ''}`}>
+                    <div key={e.id} onClick={() => { setEditingItem(e); setScreen('editExpense'); }} className={`bg-slate-900 rounded-xl p-4 active:bg-slate-800 ${flagged ? 'border border-amber-500/50' : needsReimbursement ? 'border border-amber-600/30' : ''}`}>
                       <div className="flex items-start gap-3">
                         <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center relative">
                           <span>{cat.icon}</span>
@@ -3132,11 +3287,17 @@ Respond with ONLY valid JSON:
                         </div>
                         <div className="flex-1">
                           <p className="font-medium text-white">{e.description || getCategoryName(cat)}</p>
-                          <p className="text-slate-500 text-sm">{fmtDateFull(e.date)} • {e.method === 'cash' ? '💵' : '🏦'}{hasReceipt && <span className="text-purple-400 ml-1">• Receipt</span>}</p>
+                          <p className="text-slate-500 text-sm">
+                            {fmtDateFull(e.date)} • {e.method === 'cash' ? '💵' : '🏦'}
+                            {hasReceipt && <span className="text-purple-400 ml-1">• Receipt</span>}
+                            {needsReimbursement && <span className="text-amber-400 ml-1">• Owes {e.paidByPerson}</span>}
+                            {e.paidBy === 'outOfPocket' && e.reimbursed && <span className="text-emerald-400 ml-1">• ✓ Paid</span>}
+                          </p>
                         </div>
                         <div className="text-right">
                           <p className="text-red-400 font-bold text-lg">{fmt(e.amount)}</p>
                           {flagged && <span className="text-amber-400 text-xs">⚠️ Review</span>}
+                          {needsReimbursement && !flagged && <span className="text-amber-400 text-xs">💸</span>}
                         </div>
                       </div>
                     </div>
