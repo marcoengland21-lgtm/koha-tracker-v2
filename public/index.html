@@ -2536,33 +2536,27 @@ Respond with ONLY the JSON object.
           });
         };
 
-        // Start live camera with auto-scan
+        // Start camera
         const startCamera = async () => {
           setCameraError(null);
-          setShowCamera(true);
-          setScanStatus('starting');
+          setScanStatus('');
+          
           try {
             const stream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+              video: { facingMode: 'environment' }
             });
             streamRef.current = stream;
-            if (videoRef.current) {
-              videoRef.current.srcObject = stream;
-              videoRef.current.onloadedmetadata = () => {
-                videoRef.current.play();
-                // Start auto-scan after camera is ready
-                setTimeout(() => {
-                  setScanStatus('positioning');
-                  // Auto-capture after 2 seconds of positioning
-                  setTimeout(() => autoCapture(), 2000);
-                }, 500);
-              };
-            }
+            setShowCamera(true);
+            
+            // Small delay to ensure video element is mounted
+            setTimeout(() => {
+              if (videoRef.current && streamRef.current) {
+                videoRef.current.srcObject = streamRef.current;
+              }
+            }, 100);
           } catch (err) {
             console.error('Camera error:', err);
-            setCameraError('Could not access camera');
-            setShowCamera(false);
-            setScanStatus('');
+            setCameraError('Could not access camera. Please use upload instead.');
           }
         };
 
@@ -2576,33 +2570,34 @@ Respond with ONLY the JSON object.
           setScanStatus('');
         };
 
-        // Auto capture and scan
-        const autoCapture = async () => {
-          if (!videoRef.current || !canvasRef.current || !showCamera) return;
+        // Capture photo
+        const capturePhoto = async () => {
+          if (!videoRef.current || !canvasRef.current) return;
           
           setScanStatus('capturing');
           
-          // Brief pause for visual feedback
-          await new Promise(r => setTimeout(r, 400));
-          
           const video = videoRef.current;
           const canvas = canvasRef.current;
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
+          canvas.width = video.videoWidth || 1280;
+          canvas.height = video.videoHeight || 720;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(video, 0, 0);
           
           const base64 = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
           
+          // Stop camera first
+          if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+          }
+          setShowCamera(false);
+          
+          // Now process
+          setScanningLocal(true);
           setScanStatus('reading');
           
-          // Compress
           const compressed = await compressImage(base64, 1200, 0.8);
-          
-          // Scan with AI
           const result = await scanReceipt(compressed);
-          
-          stopCamera();
           
           if (result && result.total) {
             setAmount(result.total.toString());
@@ -2634,12 +2629,10 @@ Respond with ONLY the JSON object.
           }
           
           setPhotoTaken(true);
+          setScanningLocal(false);
           setScanStatus('');
           setTimeout(() => setLastScanInfo(null), 8000);
         };
-
-        // Manual capture (for retry)
-        const capturePhoto = autoCapture;
 
         // Cleanup camera on unmount
         useEffect(() => {
@@ -2874,79 +2867,58 @@ Respond with ONLY the JSON object.
                     <div className="w-10"></div>
                   </div>
                   
-                  {/* Camera View - Auto scanning */}
+                  {/* Camera View */}
                   {showCamera ? (
                     <div className="flex-1 flex flex-col">
-                      <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden">
+                      <div className="flex-1 relative bg-black">
                         <video 
                           ref={videoRef} 
                           autoPlay 
                           playsInline
                           muted
-                          className="absolute inset-0 w-full h-full object-cover"
+                          className="w-full h-full object-cover"
                         />
                         
-                        {/* Scanning overlay */}
-                        <div className="absolute inset-0 flex items-center justify-center">
-                          {/* Dark overlay outside viewfinder */}
-                          <div className="absolute inset-0 bg-black/60"></div>
-                          
-                          {/* Viewfinder box */}
-                          <div 
-                            className={`relative w-[85%] h-[55%] rounded-2xl border-4 transition-all duration-500 ${
-                              scanStatus === 'reading' ? 'border-green-500 shadow-[0_0_30px_rgba(34,197,94,0.5)]' :
-                              scanStatus === 'capturing' ? 'border-yellow-400 shadow-[0_0_30px_rgba(250,204,21,0.5)]' :
-                              scanStatus === 'positioning' ? 'border-white/80' :
-                              'border-white/40'
-                            }`}
-                            style={{ boxShadow: scanStatus === 'reading' || scanStatus === 'capturing' ? undefined : '0 0 0 9999px rgba(0,0,0,0.6)' }}
-                          >
-                            {/* Scanning line animation */}
-                            {(scanStatus === 'positioning' || scanStatus === 'capturing') && (
-                              <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-transparent via-white to-transparent animate-pulse"></div>
-                            )}
-                            {scanStatus === 'reading' && (
-                              <div className="absolute inset-0 overflow-hidden rounded-xl">
-                                <div className="absolute inset-x-0 h-1 bg-green-400 animate-[scan_1.5s_ease-in-out_infinite]"></div>
-                              </div>
-                            )}
-                            
-                            {/* Corner markers */}
-                            <div className={`absolute -top-1 -left-1 w-10 h-10 border-t-4 border-l-4 rounded-tl-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
-                            <div className={`absolute -top-1 -right-1 w-10 h-10 border-t-4 border-r-4 rounded-tr-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
-                            <div className={`absolute -bottom-1 -left-1 w-10 h-10 border-b-4 border-l-4 rounded-bl-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
-                            <div className={`absolute -bottom-1 -right-1 w-10 h-10 border-b-4 border-r-4 rounded-br-xl transition-colors ${scanStatus === 'reading' ? 'border-green-400' : scanStatus === 'capturing' ? 'border-yellow-400' : 'border-white'}`}></div>
+                        {/* Viewfinder overlay */}
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                          <div className="w-[80%] h-[50%] border-2 border-white/60 rounded-xl">
+                            <div className="absolute -top-1 -left-1 w-6 h-6 border-t-2 border-l-2 border-white rounded-tl-lg"></div>
+                            <div className="absolute -top-1 -right-1 w-6 h-6 border-t-2 border-r-2 border-white rounded-tr-lg"></div>
+                            <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-2 border-l-2 border-white rounded-bl-lg"></div>
+                            <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-2 border-r-2 border-white rounded-br-lg"></div>
                           </div>
                         </div>
                         
-                        {/* Status text */}
-                        <div className="absolute bottom-8 left-0 right-0 flex justify-center">
-                          <div className={`px-5 py-3 rounded-2xl text-base font-medium flex items-center gap-3 ${
-                            scanStatus === 'reading' ? 'bg-green-600 text-white' :
-                            scanStatus === 'capturing' ? 'bg-yellow-500 text-black' :
-                            'bg-black/70 text-white'
-                          }`}>
-                            {scanStatus === 'reading' ? (
-                              <><span className="animate-spin">⏳</span> Reading receipt...</>
-                            ) : scanStatus === 'capturing' ? (
-                              <><span>📸</span> Capturing...</>
-                            ) : scanStatus === 'positioning' ? (
-                              <><span className="animate-pulse">📋</span> Hold steady over receipt</>
-                            ) : (
-                              <><span className="animate-pulse">⏳</span> Starting camera...</>
-                            )}
+                        {/* Instructions */}
+                        <div className="absolute top-4 left-0 right-0 flex justify-center">
+                          <div className="bg-black/60 px-4 py-2 rounded-full text-white text-sm">
+                            Position receipt in frame
                           </div>
                         </div>
                       </div>
                       
-                      {/* Cancel button only */}
-                      <div className="bg-slate-950 p-4 pb-8 flex justify-center">
-                        <button 
-                          onClick={() => { stopCamera(); setScreen('home'); }}
-                          className="px-8 py-3 bg-slate-800 rounded-xl text-slate-300 font-medium"
-                        >
-                          Cancel
-                        </button>
+                      {/* Bottom controls */}
+                      <div className="bg-slate-950 p-6 pb-10">
+                        <div className="flex items-center justify-center gap-6">
+                          <button 
+                            onClick={stopCamera}
+                            className="px-6 py-3 bg-slate-800 rounded-xl text-slate-300"
+                          >
+                            Cancel
+                          </button>
+                          <button 
+                            onClick={capturePhoto}
+                            className="px-8 py-4 bg-white rounded-full"
+                          >
+                            <div className="w-12 h-12 bg-white border-4 border-slate-900 rounded-full"></div>
+                          </button>
+                          <button 
+                            onClick={() => { stopCamera(); fileInputRef.current?.click(); }}
+                            className="px-4 py-3 bg-slate-800 rounded-xl text-xl"
+                          >
+                            🖼️
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ) : scanningLocal ? (
