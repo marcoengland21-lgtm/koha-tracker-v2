@@ -2530,56 +2530,21 @@ Respond with ONLY the JSON object.
           const pendingImage = localStorage.getItem('pending_scan_image');
           const pendingTime = localStorage.getItem('pending_scan_time');
           
-          if (pendingImage && pendingTime && !editing) {
-            const age = Date.now() - new Date(pendingTime).getTime();
+          if (pendingImage && pendingTime && !editing && !photoTaken) {
+            const age = Date.now() - parseInt(pendingTime);
             log('Found pending scan from ' + Math.round(age/1000) + 's ago');
             
-            // Only recover if less than 2 minutes old
-            if (age < 120000) {
-              log('Recovering pending scan...');
+            // Only recover if less than 5 minutes old
+            if (age < 300000) {
+              log('Recovering image from localStorage');
               setPendingReceipt({
                 originalImage: pendingImage,
-                scannedAt: pendingTime,
+                scannedAt: new Date(parseInt(pendingTime)).toISOString(),
                 vendor: '',
                 total: 0
               });
               setPhotoTaken(true);
-              setScanningLocal(true);
-              setScanStatus('Recovering scan...');
-              
-              // Process with AI
-              scanReceipt(pendingImage).then(result => {
-                log('Recovery AI result: ' + JSON.stringify(result).substring(0, 200));
-                if (result && result.total) {
-                  setAmount(result.total.toString());
-                  if (result.date) setDate(result.date);
-                  if (result.category) setCategory(result.category);
-                  if (result.vendor) setDescription(result.vendor);
-                  setPendingReceipt({
-                    originalImage: pendingImage,
-                    vendor: result.vendor,
-                    items: result.items,
-                    total: result.total,
-                    date: result.date,
-                    time: result.time,
-                    rawText: result.rawText,
-                    scannedAt: pendingTime
-                  });
-                  setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
-                } else {
-                  setLastScanInfo({ error: true, message: 'Could not read receipt. Enter manually.' });
-                }
-                setScanningLocal(false);
-                setScanStatus('');
-                localStorage.removeItem('pending_scan_image');
-                localStorage.removeItem('pending_scan_time');
-                setTimeout(() => setLastScanInfo(null), 8000);
-              }).catch(err => {
-                log('Recovery AI error: ' + err.message);
-                setScanningLocal(false);
-                setScanStatus('');
-                setLastScanInfo({ error: true, message: 'AI error. Enter manually.' });
-              });
+              setLastScanInfo({ success: true, message: 'Photo recovered! Tap "Read with AI" or enter details manually.' });
             } else {
               log('Pending scan too old, clearing');
               localStorage.removeItem('pending_scan_image');
@@ -2587,6 +2552,55 @@ Respond with ONLY the JSON object.
             }
           }
         }, []);
+        
+        // Manual AI scan function
+        const runAIScan = async () => {
+          if (!pendingReceipt?.originalImage) {
+            log('No image to scan');
+            return;
+          }
+          
+          log('Manual AI scan triggered');
+          setScanningLocal(true);
+          setScanStatus('Reading receipt...');
+          
+          try {
+            const result = await scanReceipt(pendingReceipt.originalImage);
+            log('AI result: ' + JSON.stringify(result).substring(0, 200));
+            
+            if (result && result.total) {
+              setAmount(result.total.toString());
+              if (result.date) setDate(result.date);
+              if (result.category) setCategory(result.category);
+              if (result.vendor) setDescription(result.vendor);
+              
+              setPendingReceipt(prev => ({
+                ...prev,
+                vendor: result.vendor,
+                items: result.items,
+                total: result.total,
+                date: result.date,
+                time: result.time,
+                rawText: result.rawText
+              }));
+              
+              setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
+              
+              // Clear localStorage on success
+              localStorage.removeItem('pending_scan_image');
+              localStorage.removeItem('pending_scan_time');
+            } else {
+              setLastScanInfo({ error: true, message: 'Could not read receipt. Enter details manually.' });
+            }
+          } catch (err) {
+            log('AI error: ' + err.message);
+            setLastScanInfo({ error: true, message: 'AI error: ' + err.message });
+          }
+          
+          setScanningLocal(false);
+          setScanStatus('');
+          setTimeout(() => setLastScanInfo(null), 8000);
+        };
         
         // Get receipt (from pending scan or existing expense)
         const currentReceipt = pendingReceipt || (editing && editingItem?.receipt) || null;
@@ -2742,122 +2756,54 @@ Respond with ONLY the JSON object.
 
         const handleScan = async (e) => {
           log('--- SCAN STARTED ---');
-          log('Event type: ' + e?.type);
-          log('Target: ' + e?.target?.tagName);
           
           try {
             const file = e.target.files?.[0];
-            log('Files array length: ' + (e.target.files?.length || 0));
-            
             if (!file) {
-              log('ERROR: No file in event');
+              log('ERROR: No file');
               return;
             }
             
-            log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB, type: ' + file.type + ')');
-            setScanningLocal(true);
-            setScanStatus('Loading image...');
-            setLastScanInfo(null);
+            log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB)');
             
+            // Use FileReader but save immediately when we get the result
             const reader = new FileReader();
             
-            reader.onerror = (error) => {
-              log('ERROR: FileReader failed: ' + error);
-              setScanningLocal(false);
-              setScanStatus('');
-              setPhotoTaken(true);
-            };
-            
-            reader.onload = async () => {
-              log('FileReader onload fired');
+            reader.onload = () => {
+              log('FileReader onload');
+              const base64 = reader.result.split(',')[1];
+              log('Got base64: ' + Math.round(base64.length/1024) + 'KB');
+              
+              // Save to localStorage SYNCHRONOUSLY - no awaits, no promises
               try {
-                const base64 = reader.result.split(',')[1];
-                log('Base64 length: ' + base64.length + ' chars (' + Math.round(base64.length/1024) + 'KB)');
-                
-                // Save to localStorage IMMEDIATELY so it survives page reload
-                log('Saving to localStorage...');
-                try {
-                  localStorage.setItem('pending_scan_image', base64);
-                  localStorage.setItem('pending_scan_time', new Date().toISOString());
-                  log('Saved to localStorage OK');
-                } catch (storageErr) {
-                  log('localStorage save failed (image too big?): ' + storageErr.message);
-                }
-                
-                // Set photoTaken IMMEDIATELY to switch screens
-                log('Setting photoTaken=true NOW');
-                setPhotoTaken(true);
-                setScanningLocal(true);
-                
-                // Save the image to state
-                log('Saving pending receipt to state...');
-                setPendingReceipt({
-                  originalImage: base64,
-                  scannedAt: new Date().toISOString(),
-                  vendor: '',
-                  total: 0
-                });
-                
-                setScanStatus('Reading with AI...');
-                log('Calling scanReceipt API...');
-                
-                try {
-                  const result = await scanReceipt(base64);
-                  log('AI result: ' + JSON.stringify(result).substring(0, 200));
-                  
-                  if (result && result.total) {
-                    log('SUCCESS: Got total=' + result.total + ', vendor=' + result.vendor);
-                    setAmount(result.total.toString());
-                    if (result.date) setDate(result.date);
-                    if (result.category) setCategory(result.category);
-                    if (result.vendor) setDescription(result.vendor);
-                    
-                    setPendingReceipt({
-                      originalImage: base64,
-                      vendor: result.vendor,
-                      items: result.items,
-                      total: result.total,
-                      date: result.date,
-                      time: result.time,
-                      rawText: result.rawText,
-                      scannedAt: new Date().toISOString()
-                    });
-                    
-                    setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
-                  } else {
-                    log('WARN: AI returned no total');
-                    setLastScanInfo({ error: true, message: 'AI could not read receipt. Enter details manually.' });
-                  }
-                  
-                  // Clear localStorage after success
-                  localStorage.removeItem('pending_scan_image');
-                  localStorage.removeItem('pending_scan_time');
-                  
-                } catch (aiError) {
-                  log('ERROR: AI call failed: ' + aiError.message);
-                  setLastScanInfo({ error: true, message: 'AI unavailable. Enter details manually.' });
-                }
-                
-                setScanningLocal(false);
-                setScanStatus('');
-                log('--- SCAN COMPLETE ---');
-                setTimeout(() => setLastScanInfo(null), 8000);
-                
-              } catch (processError) {
-                log('ERROR: Processing failed: ' + processError.message);
-                setScanningLocal(false);
-                setScanStatus('');
-                setPhotoTaken(true);
+                // For large images, we may need to truncate for localStorage
+                // Most browsers support 5-10MB, base64 is ~1.3x larger than original
+                localStorage.setItem('pending_scan_image', base64);
+                localStorage.setItem('pending_scan_time', Date.now().toString());
+                log('Saved to localStorage');
+              } catch (err) {
+                log('localStorage error: ' + err.message);
               }
+              
+              // Update state synchronously
+              setPhotoTaken(true);
+              setPendingReceipt({
+                originalImage: base64,
+                scannedAt: new Date().toISOString(),
+                vendor: '',
+                total: 0
+              });
+              log('State updated, showing form');
             };
             
-            log('Calling reader.readAsDataURL...');
+            reader.onerror = () => {
+              log('FileReader error');
+            };
+            
             reader.readAsDataURL(file);
             
           } catch (error) {
-            log('ERROR: Outer catch: ' + error.message);
-            setScanningLocal(false);
-            setScanStatus('');
+            log('ERROR: ' + error.message);
           }
         };
 
@@ -3030,21 +2976,41 @@ Respond with ONLY the JSON object.
 
               {/* Receipt Preview */}
               {currentReceipt && (
-                <button
-                  onClick={() => setShowReceipt(true)}
-                  className="w-full bg-purple-900/30 border border-purple-700/50 rounded-xl p-3 mb-4 flex items-center justify-between active:bg-purple-900/50"
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="text-2xl">🧾</span>
-                    <div className="text-left">
-                      <p className="text-purple-200 font-medium">{currentReceipt.vendor || 'Receipt attached'}</p>
-                      <p className="text-purple-400 text-xs">
-                        {Array.isArray(currentReceipt.items) ? `${currentReceipt.items.length} items` : 'Tap to view'}
-                      </p>
+                <div className="mb-4">
+                  <button
+                    onClick={() => setShowReceipt(true)}
+                    className="w-full bg-purple-900/30 border border-purple-700/50 rounded-xl p-3 flex items-center justify-between active:bg-purple-900/50"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl">🧾</span>
+                      <div className="text-left">
+                        <p className="text-purple-200 font-medium">{currentReceipt.vendor || 'Photo attached'}</p>
+                        <p className="text-purple-400 text-xs">
+                          {currentReceipt.total ? `$${currentReceipt.total}` : 'Tap to view'}
+                          {Array.isArray(currentReceipt.items) && currentReceipt.items.length > 0 && ` • ${currentReceipt.items.length} items`}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                  <span className="text-purple-400">View →</span>
-                </button>
+                    <span className="text-purple-400">View →</span>
+                  </button>
+                  
+                  {/* Show AI scan button if we have image but no AI result yet */}
+                  {!currentReceipt.total && !scanningLocal && (
+                    <button
+                      onClick={runAIScan}
+                      className="w-full mt-2 py-3 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl font-medium flex items-center justify-center gap-2"
+                    >
+                      🤖 Read with AI
+                    </button>
+                  )}
+                  
+                  {/* Show scanning state */}
+                  {scanningLocal && (
+                    <div className="w-full mt-2 py-3 bg-slate-800 rounded-xl flex items-center justify-center gap-2 text-slate-300">
+                      <span className="spin">🔄</span> {scanStatus || 'Reading...'}
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Receipt Viewer Modal */}
