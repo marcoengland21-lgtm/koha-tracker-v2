@@ -53,6 +53,10 @@
       background-size: 200% 100%;
       animation: shimmer 1.5s infinite;
     }
+    @keyframes indeterminate {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(300%); }
+    }
   </style>
 </head>
 <body>
@@ -2693,17 +2697,11 @@ Respond with ONLY valid JSON:
           
           log('Image size: ' + Math.round(pendingReceipt.originalImage.length / 1024) + 'KB');
           startScanning();
-          setScanProgress(0);
-          setScanStatus('Initializing...');
+          setScanProgress(-1); // -1 = indeterminate/animated
+          setScanStatus('Sending to AI...');
           
           try {
-            const result = await scanReceipt(pendingReceipt.originalImage, (progress) => {
-              setScanProgress(progress);
-              setScanStatus(progress < 30 ? 'Reading text...' : progress < 70 ? 'Processing...' : 'Analyzing...');
-            });
-            
-            setScanProgress(100);
-            setScanStatus('Complete!');
+            const result = await scanReceipt(pendingReceipt.originalImage, () => {});
             
             if (result && result.total) {
               log('SUCCESS: total=' + result.total + ', vendor=' + result.vendor);
@@ -2730,7 +2728,7 @@ Respond with ONLY valid JSON:
             setLastScanInfo({ error: true, message: 'Scan failed: ' + err.message });
           }
           
-          setTimeout(() => stopScanning(), 500);
+          stopScanning();
           setTimeout(() => setLastScanInfo(null), 8000);
         };
         
@@ -2890,8 +2888,25 @@ Respond with ONLY valid JSON:
 
         return (
           <div className="min-h-screen bg-slate-950 text-white pb-24">
-            {/* Full-screen scanning overlay - much more visible! */}
-            <ScanningOverlay visible={scanningLocal} progress={scanProgress} status={scanStatus} />
+            {/* Inline scanning progress bar */}
+            {scanningLocal && (
+              <div className="fixed top-0 left-0 right-0 z-50 bg-slate-900 border-b border-slate-700 p-3 slide-in">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-white text-sm font-medium flex items-center gap-2">
+                    <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span></span>
+                    {scanStatus || 'Processing...'}
+                  </span>
+                  {scanProgress >= 0 && <span className="text-cyan-400 text-sm font-bold">{scanProgress}%</span>}
+                </div>
+                <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                  {scanProgress >= 0 ? (
+                    <div className="h-full bg-gradient-to-r from-cyan-500 via-purple-500 to-pink-500 rounded-full transition-all duration-300 ease-out" style={{ width: `${scanProgress}%` }} />
+                  ) : (
+                    <div className="h-full w-1/3 bg-gradient-to-r from-cyan-500 via-purple-500 to-pink-500 rounded-full animate-pulse" style={{ animation: 'indeterminate 1.5s ease-in-out infinite' }} />
+                  )}
+                </div>
+              </div>
+            )}
             
             <div className="px-5 pt-8">
               <button onClick={handleBack} className="text-slate-500 text-sm mb-4">← Back</button>
@@ -2988,21 +3003,6 @@ Respond with ONLY valid JSON:
                           <div className="flex items-center justify-center gap-3"><span className="text-lg">✨</span><span>Autofill with AI</span></div>
                           <p className="text-cyan-200/60 text-xs mt-1">Powered by Google Cloud Vision</p>
                         </button>
-                      )}
-                      
-                      {scanningLocal && (
-                        <div className="w-full mt-3 bg-slate-800/80 rounded-xl p-4 border border-slate-700">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-white font-medium flex items-center gap-2">
-                              <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span></span>
-                              {scanStatus || 'Processing...'}
-                            </span>
-                            <span className="text-cyan-400 font-bold">{scanProgress}%</span>
-                          </div>
-                          <div className="h-2 bg-slate-900 rounded-full overflow-hidden">
-                            <div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all duration-300 ease-out" style={{ width: `${scanProgress}%` }} />
-                          </div>
-                        </div>
                       )}
                     </div>
                   )}
