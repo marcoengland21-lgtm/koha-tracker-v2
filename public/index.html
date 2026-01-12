@@ -3009,7 +3009,7 @@ Respond with ONLY valid JSON:
               const age = Date.now() - (result.savedAt || 0);
               log('Found pending scan RESULT from ' + Math.round(age/1000) + 's ago');
               
-              if (age < 300000) { // 5 minutes
+              if (age < 30000) { // 30 seconds
                 log('Recovering scan result: total=' + result.total + ', vendor=' + result.vendor);
                 
                 // Fill form directly
@@ -3083,8 +3083,8 @@ Respond with ONLY valid JSON:
             const age = Date.now() - parseInt(pendingTime);
             log('Found pending scan IMAGE from ' + Math.round(age/1000) + 's ago');
             
-            // Only recover if less than 5 minutes old
-            if (age < 300000) {
+            // Only recover if less than 30 seconds old
+            if (age < 30000) {
               log('Recovering image from localStorage');
               setPendingReceipt({
                 originalImage: pendingImage,
@@ -3129,6 +3129,8 @@ Respond with ONLY valid JSON:
               log('Pending scan too old, clearing');
               localStorage.removeItem('pending_scan_image');
               localStorage.removeItem('pending_scan_time');
+              sessionStorage.removeItem('pending_scan_image');
+              sessionStorage.removeItem('pending_scan_time');
             }
           }
         }, []);
@@ -3256,8 +3258,14 @@ Respond with ONLY valid JSON:
           } catch (err) {
             log('ERROR in runAIScan: ' + err.message);
             log('Error stack: ' + err.stack);
-            setLastScanInfo({ error: true, message: 'AI error: ' + err.message });
+            setLastScanInfo({ error: true, message: 'Scan failed: ' + err.message + '. Enter details manually.' });
+            // Clear all pending scan data on error
             localStorage.removeItem('pending_scan_result');
+            localStorage.removeItem('pending_scan_image');
+            localStorage.removeItem('pending_scan_time');
+            sessionStorage.removeItem('pending_scan_result');
+            sessionStorage.removeItem('pending_scan_image');
+            sessionStorage.removeItem('pending_scan_time');
           }
           
           setScanningLocal(false);
@@ -3529,7 +3537,17 @@ Respond with ONLY valid JSON:
         return (
           <div className="min-h-screen bg-slate-950 text-white pb-24">
             <div className="px-5 pt-8">
-              <button onClick={() => { setScreen(editing ? 'expenses' : 'home'); setEditingItem(null); }} className="text-slate-500 text-sm mb-4">← Back</button>
+              <button onClick={() => { 
+                // Clear any pending scan data when going back
+                localStorage.removeItem('pending_scan_image');
+                localStorage.removeItem('pending_scan_time');
+                localStorage.removeItem('pending_scan_result');
+                sessionStorage.removeItem('pending_scan_image');
+                sessionStorage.removeItem('pending_scan_time');
+                sessionStorage.removeItem('pending_scan_result');
+                setScreen(editing ? 'expenses' : 'home'); 
+                setEditingItem(null); 
+              }} className="text-slate-500 text-sm mb-4">← Back</button>
               
               {/* Show photo prompt for new expenses without photo */}
               {!editing && !photoTaken ? (
