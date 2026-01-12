@@ -39,6 +39,20 @@
       background-size: 300% 100%;
       animation: progressBar 2s linear infinite;
     }
+    @keyframes scanPulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.05); opacity: 0.8; }
+    }
+    .scan-pulse { animation: scanPulse 1.5s ease-in-out infinite; }
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .shimmer {
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+    }
   </style>
 </head>
 <body>
@@ -676,6 +690,51 @@ Respond with ONLY valid JSON:
         {details && <p className="text-slate-500 text-xs mt-2">{details}</p>}
       </div>
     );
+
+    // Full-screen Scanning Overlay - much more visible!
+    const ScanningOverlay = ({ visible, progress, status }) => {
+      if (!visible) return null;
+      
+      const getEmoji = () => {
+        if (progress < 30) return '📷';
+        if (progress < 60) return '🔍';
+        if (progress < 90) return '✨';
+        return '✅';
+      };
+      
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 backdrop-blur-sm fade-in">
+          <div className="text-center px-8 max-w-sm">
+            <div className="relative w-32 h-32 mx-auto mb-8">
+              <svg className="w-full h-full spin" style={{ animationDuration: '3s' }}>
+                <circle cx="64" cy="64" r="60" fill="none" stroke="url(#scanGradient)" strokeWidth="4" strokeLinecap="round" strokeDasharray="280" strokeDashoffset={280 - (280 * progress / 100)} />
+                <defs>
+                  <linearGradient id="scanGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#06b6d4" />
+                    <stop offset="50%" stopColor="#8b5cf6" />
+                    <stop offset="100%" stopColor="#ec4899" />
+                  </linearGradient>
+                </defs>
+              </svg>
+              <div className="absolute inset-0 flex items-center justify-center">
+                <span className="text-5xl scan-pulse">{getEmoji()}</span>
+              </div>
+            </div>
+            <div className="text-5xl font-bold text-white mb-2">{progress}%</div>
+            <div className="text-lg text-cyan-400 font-medium mb-4">{status || 'Processing...'}</div>
+            <div className="h-2 bg-slate-800 rounded-full overflow-hidden mb-4">
+              <div className="h-full bg-gradient-to-r from-cyan-500 via-purple-500 to-pink-500 rounded-full transition-all duration-300 ease-out shimmer" style={{ width: `${progress}%` }} />
+            </div>
+            <p className="text-slate-500 text-sm">
+              {progress < 30 ? 'Reading your photo...' :
+               progress < 60 ? 'Extracting text from receipt...' :
+               progress < 90 ? 'Finding amounts and details...' :
+               'Almost done!'}
+            </p>
+          </div>
+        </div>
+      );
+    };
 
     const App = () => {
       // Check if we're returning from a scan reload
@@ -1324,7 +1383,41 @@ Respond with ONLY valid JSON:
         if (cashOutAmount) cashOut = cashOutAmount.amount;
         if (gstAmount && !gst) gst = gstAmount.amount;
         
-        // Find vendor and category using NZ stores dictionary
+        // *** IMPROVED CATEGORY DETECTION: Check content FIRST, then vendor name ***
+        // This ensures "Berghotel" with food items gets categorized as catering, not accommodation
+        
+        const headerText = lines.slice(0, 10).join(' ').toLowerCase();
+        const fullText = lines.join(' ').toLowerCase();
+        
+        // Food/drink keywords - if found, it's food regardless of venue name
+        const foodKeywords = ['latte', 'macchiato', 'cappuccino', 'espresso', 'flat white', 'long black', 'mocha',
+                             'coffee', 'tea', 'hot chocolate', 'chai',
+                             'burger', 'pizza', 'sandwich', 'salad', 'soup', 'pasta', 'rice', 'noodles',
+                             'chicken', 'beef', 'pork', 'fish', 'lamb', 'steak', 'schnitzel', 'sausage',
+                             'breakfast', 'lunch', 'dinner', 'brunch', 'meal', 'combo', 'fries', 'chips',
+                             'eggs', 'bacon', 'toast', 'pancake', 'waffle', 'muffin', 'croissant', 'pastry',
+                             'cake', 'cookie', 'dessert', 'ice cream', 'gelato',
+                             'cafe', 'bistro', 'kitchen', 'grill', 'diner', 'eatery', 'takeaway', 'takeout',
+                             'sushi', 'ramen', 'pho', 'curry', 'thai', 'chinese', 'indian', 'mexican'];
+        
+        const drinkKeywords = ['wine', 'beer', 'lager', 'ale', 'cider', 'cocktail', 'martini',
+                              'vodka', 'whisky', 'whiskey', 'rum', 'gin', 'brandy', 'cognac',
+                              'spirits', 'alcohol', 'liquor', 'champagne', 'prosecco'];
+        
+        // Check content FIRST - this takes priority over vendor name
+        let hasFoodItems = foodKeywords.some(kw => fullText.includes(kw));
+        let hasDrinkItems = drinkKeywords.some(kw => fullText.includes(kw));
+        
+        // If we find food items, categorize as catering regardless of venue name (e.g. "Berghotel")
+        if (hasFoodItems) {
+          category = 'catering';
+          console.log('[Category] Content-based: catering (found food items in receipt)');
+        } else if (hasDrinkItems) {
+          category = 'drinks';
+          console.log('[Category] Content-based: drinks (found drink items in receipt)');
+        }
+        
+        // NZ stores dictionary - used for vendor name AND category (only if not already set by content)
         const nzStores = {
           'countdown': { name: 'Countdown', category: 'kai' },
           'woolworths': { name: 'Countdown', category: 'kai' },
@@ -1340,6 +1433,7 @@ Respond with ONLY valid JSON:
           'subway': { name: 'Subway', category: 'catering' },
           'pizza hut': { name: 'Pizza Hut', category: 'catering' },
           'domino': { name: 'Dominos', category: 'catering' },
+          'starbucks': { name: 'Starbucks', category: 'catering' },
           'super liquor': { name: 'Super Liquor', category: 'drinks' },
           'liquorland': { name: 'Liquorland', category: 'drinks' },
           'z energy': { name: 'Z Energy', category: 'petrol' },
@@ -1360,41 +1454,47 @@ Respond with ONLY valid JSON:
           'funeral': { name: 'Funeral Services', category: 'funeral_home' },
           'mortuary': { name: 'Mortuary', category: 'funeral_home' },
           'motel': { name: 'Motel', category: 'accommodation' },
-          'hotel': { name: 'Hotel', category: 'accommodation' },
           'airbnb': { name: 'Airbnb', category: 'accommodation' },
           'air new zealand': { name: 'Air New Zealand', category: 'flights' },
           'jetstar': { name: 'Jetstar', category: 'flights' },
         };
         
-        const headerText = lines.slice(0, 10).join(' ').toLowerCase();
-        const fullText = lines.join(' ').toLowerCase();
-        
+        // Find vendor name from known stores (also set category if not already set by content)
         for (const [pattern, info] of Object.entries(nzStores)) {
           if (headerText.includes(pattern)) {
             vendor = info.name;
-            category = info.category;
+            if (category === 'misc') category = info.category; // Only set if content didn't find anything
             break;
           }
         }
         
-        if (category === 'misc' && !vendor) {
+        if (!vendor) {
           for (const [pattern, info] of Object.entries(nzStores)) {
             if (fullText.includes(pattern)) {
-              if (!vendor) vendor = info.name;
-              category = info.category;
+              vendor = info.name;
+              if (category === 'misc') category = info.category;
               break;
             }
           }
         }
         
-        // Content-based category detection
+        // Handle "hotel" specially - only categorize as accommodation if NO food items found
+        // This fixes the "Berghotel restaurant" case
+        if (category === 'misc' && !hasFoodItems && !hasDrinkItems) {
+          if (fullText.includes('hotel') || fullText.includes('lodge')) {
+            // Only if it looks like actual accommodation (room, night, stay, check-in)
+            if (/\b(room|night|stay|check.?in|check.?out|accommodation|booking|reservation)\b/i.test(fullText)) {
+              category = 'accommodation';
+              if (!vendor) vendor = 'Hotel';
+              console.log('[Category] Vendor-based: accommodation (hotel with booking keywords)');
+            }
+          }
+        }
+        
+        // Additional content-based detection if still misc
         if (category === 'misc') {
-          if (/\b(burger|pizza|chicken|fries|meal|combo|coffee|latte|sandwich|takeaway|restaurant)\b/i.test(fullText)) {
-            category = 'catering';
-          } else if (/\b(groceries|produce|fruit|vegetable|meat|dairy|bread|milk)\b/i.test(fullText)) {
+          if (/\b(groceries|produce|fruit|vegetable|meat|dairy|bread|milk|supermarket)\b/i.test(fullText)) {
             category = 'kai';
-          } else if (/\b(wine|beer|vodka|whisky|spirits|alcohol)\b/i.test(fullText)) {
-            category = 'drinks';
           } else if (/\b(petrol|diesel|fuel|litre|pump|91|95|unleaded)\b/i.test(fullText)) {
             category = 'petrol';
           } else if (/\b(flower|floral|bouquet|wreath)\b/i.test(fullText)) {
@@ -1402,7 +1502,7 @@ Respond with ONLY valid JSON:
           }
         }
         
-        // Find vendor name if not found
+        // Find vendor name if not found from known stores
         if (!vendor) {
           const skipPatterns = [/^\s*$/, /^[\d\s\-\.\:\/]+$/, /^tax\s*inv/i, /^invoice/i, /^receipt/i];
           for (const line of lines.slice(0, 8)) {
@@ -2281,6 +2381,9 @@ Respond with ONLY valid JSON:
         
         const fileInputRef = useRef(null);
         
+        // FIX: Track if we've already recovered this mount to prevent repeated recovery causing glitches
+        const hasRecoveredRef = useRef(false);
+        
         const log = (msg) => {
           const timestamp = new Date().toLocaleTimeString();
           const entry = '[' + timestamp + '] ' + msg;
@@ -2289,14 +2392,21 @@ Respond with ONLY valid JSON:
         };
         const clearLog = () => { localStorage.removeItem('scan_debug_log'); setDebugLog(''); };
         
-        // FIX #3: Recovery on mount using ScanSession
+        // FIX #3: Recovery on mount using ScanSession (with debounce to prevent glitchy multi-recovery)
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing);
           if (editing) return;
           
+          // CRITICAL: Skip if we've already recovered to prevent glitchy multiple state updates
+          if (hasRecoveredRef.current) {
+            log('Skipping recovery - already recovered this session');
+            return;
+          }
+          
           // Check for ScanSession first (new unified storage)
           const session = ScanSession.get();
           if (session && session.image) {
+            hasRecoveredRef.current = true; // Mark as recovered BEFORE state updates
             log('Recovering from ScanSession, age=' + Math.round((Date.now() - session.savedAt) / 1000) + 's');
             
             setPendingReceipt({
@@ -2339,6 +2449,7 @@ Respond with ONLY valid JSON:
             try {
               const result = JSON.parse(pendingResult);
               if (Date.now() - (result.savedAt || 0) < 60000) {
+                hasRecoveredRef.current = true; // Mark as recovered
                 log('Recovering from old pending_scan_result');
                 if (result.total) setAmount(result.total.toString());
                 if (result.vendor) setDescription(result.vendor);
@@ -2417,6 +2528,7 @@ Respond with ONLY valid JSON:
               
               // Save immediately with ScanSession
               ScanSession.save({ image: compressed, cameraOpenedAt: Date.now() });
+              hasRecoveredRef.current = true; // Mark as having data to prevent re-recovery glitches
               
               // Update state directly (no reload!)
               setPendingReceipt({
@@ -2581,6 +2693,9 @@ Respond with ONLY valid JSON:
 
         return (
           <div className="min-h-screen bg-slate-950 text-white pb-24">
+            {/* Full-screen scanning overlay - much more visible! */}
+            <ScanningOverlay visible={scanningLocal} progress={scanProgress} status={scanStatus} />
+            
             <div className="px-5 pt-8">
               <button onClick={handleBack} className="text-slate-500 text-sm mb-4">← Back</button>
               
@@ -2591,17 +2706,9 @@ Respond with ONLY valid JSON:
                   <input ref={fileInputRef} type="file" accept="image/*" onChange={handleScan} className="hidden" key="camera-input" />
                   
                   {scanningLocal ? (
-                    <div className="text-center w-full max-w-sm">
-                      <div className="w-24 h-24 mx-auto mb-6 rounded-2xl bg-cyan-500/20 flex items-center justify-center"><span className="text-5xl">✨</span></div>
-                      <h2 className="text-2xl font-bold text-white mb-2">Reading Receipt</h2>
-                      <p className="text-cyan-400 text-lg mb-4">{scanStatus || 'Initializing...'}</p>
-                      <div className="relative w-full h-3 bg-slate-800 rounded-full overflow-hidden mb-2">
-                        <div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all duration-300 ease-out" style={{width: `${scanProgress}%`}} />
-                      </div>
-                      <p className="text-slate-500 text-sm">{scanProgress}% complete</p>
-                    </div>
+                    /* When scanning, show nothing here as the full-screen overlay handles it */
+                    null
                   ) : (
-                    <>
                       <div className="w-24 h-24 mb-6 rounded-2xl bg-purple-500/20 flex items-center justify-center"><span className="text-5xl">🧾</span></div>
                       <h1 className="text-2xl font-bold text-white mb-2">Add Receipt</h1>
                       <p className="text-slate-400 text-center mb-8">Snap a photo and AI will read it</p>
