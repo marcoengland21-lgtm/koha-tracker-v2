@@ -2824,23 +2824,14 @@ Respond with ONLY the JSON object.
               {/* Show photo prompt for new expenses without photo */}
               {!editing && !photoTaken ? (
                 <div className="min-h-[70vh] flex flex-col items-center justify-center px-6">
-                  {/* Single file input that can do both camera and gallery */}
+                  {/* Single file input - iOS will show picker menu */}
                   <input 
                     ref={fileInputRef} 
-                    type="file" 
-                    accept="image/*" 
-                    capture="environment"
-                    onChange={handleScan} 
-                    className="hidden" 
-                    key="camera-input"
-                  />
-                  <input 
-                    id="galleryInput"
                     type="file" 
                     accept="image/*"
                     onChange={handleScan} 
                     className="hidden" 
-                    key="gallery-input"
+                    key="camera-input"
                   />
                   
                   {scanningLocal ? (
@@ -2869,19 +2860,15 @@ Respond with ONLY the JSON object.
                       <div className="w-full max-w-xs space-y-3">
                         <button 
                           type="button"
-                          onClick={(e) => { e.preventDefault(); log('Take Photo clicked'); fileInputRef.current?.click(); }}
+                          onClick={(e) => { e.preventDefault(); log('Add Photo clicked'); fileInputRef.current?.click(); }}
                           className="w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl text-lg font-bold flex items-center justify-center gap-3"
                         >
-                          📸 Take Photo
+                          📷 Add Photo
                         </button>
                         
-                        <button 
-                          type="button"
-                          onClick={(e) => { e.preventDefault(); log('Gallery clicked'); document.getElementById('galleryInput')?.click(); }}
-                          className="w-full py-4 bg-slate-800 rounded-2xl text-lg font-medium text-slate-300 flex items-center justify-center gap-3"
-                        >
-                          🖼️ Choose from Photos
-                        </button>
+                        <p className="text-slate-500 text-xs text-center">
+                          You'll be able to take a new photo or choose from your library
+                        </p>
                         
                         <button 
                           type="button"
@@ -2942,7 +2929,7 @@ Respond with ONLY the JSON object.
                     <h1 className="text-2xl font-bold">{editing ? "Edit" : "Add Expense"}</h1>
                     {!editing && (
                       <>
-                        <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleScan} className="hidden" />
+                        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleScan} className="hidden" />
                         <button onClick={() => fileInputRef.current?.click()} disabled={scanningLocal || scanning} className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-xl text-sm font-medium disabled:opacity-50">
                           {scanningLocal || scanning ? <><span className="spin">🔄</span> Scanning...</> : <>📷 Rescan</>}
                         </button>
