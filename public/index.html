@@ -560,7 +560,15 @@ Respond with ONLY valid JSON:
     );
 
     const App = () => {
-      const [screen, setScreen] = useState('home');
+      // Check if we're returning from a scan reload
+      const [screen, setScreen] = useState(() => {
+        const returnTo = sessionStorage.getItem('return_to_screen');
+        if (returnTo) {
+          sessionStorage.removeItem('return_to_screen');
+          return returnTo;
+        }
+        return 'home';
+      });
       const [gifts, setGifts] = useState(() => S.get('gifts', []));
       const [expenses, setExpenses] = useState(() => S.get('expenses', []));
       const [transfers, setTransfers] = useState(() => S.get('transfers', []));
@@ -988,6 +996,8 @@ Respond with ONLY valid JSON:
             });
             localStorage.setItem('pending_scan_result', toSave);
             sessionStorage.setItem('pending_scan_result', toSave);
+            // Also save that we should return to addExpense screen
+            sessionStorage.setItem('return_to_screen', 'addExpense');
             apiLog('Saved result to both localStorage and sessionStorage');
             
             // Small delay then reload to ensure write completes
