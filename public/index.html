@@ -1016,7 +1016,7 @@ Respond with ONLY valid JSON:
           const result = await response.json();
           
           if (!response.ok || result.error) {
-            apiLog('Vision API error: ' + (result.error || 'Unknown error'));
+            apiLog('Vision API error: ' + (result.error || 'Unknown error') + (result.details ? ' - ' + result.details.substring(0, 200) : '') + (result.code ? ' (code: ' + result.code + ')' : ''));
             throw new Error(result.error || 'Vision API failed');
           }
           
