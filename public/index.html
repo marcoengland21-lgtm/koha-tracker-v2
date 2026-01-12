@@ -2507,13 +2507,13 @@ Respond with ONLY valid JSON:
           sessionStorage.setItem('koha_scan_status', scanStatus);
         }, [scanningLocal, scanProgress, scanStatus]);
 
-        // FIX #7: Save breadcrumb BEFORE opening camera
+        // FIX #7: Save breadcrumb BEFORE opening camera - but DON'T destroy existing session data
         const handleOpenCamera = (e) => {
           e.preventDefault();
-          log('Opening camera - saving breadcrumb first');
+          log('Opening camera');
           sessionStorage.setItem('return_to_screen', 'addExpense');
-          clearRecoveryFlag(); // Clear old recovery flag for new scan
-          ScanSession.save({ cameraOpenedAt: Date.now() });
+          // DON'T call ScanSession.save here - it would overwrite existing scan data!
+          // DON'T clear recovery flag here - only clear when we actually get new data
           fileInputRef.current?.click();
         };
 
