@@ -1,76 +1,4215 @@
-// Google Cloud Vision API for receipt OCR
-export default async (req) => {
-  if (req.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405 });
-  }
-
-  try {
-    const { image } = await req.json();
-    
-    if (!image) {
-      return Response.json({ error: 'No image provided' }, { status: 400 });
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Koha">
+  <meta name="theme-color" content="#020617">
+  <meta name="description" content="Track koha and expenses for tangihanga">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="manifest" href="manifest.json">
+  <title>Meaalofa • Koha Tracker</title>
+  <!-- Google Cloud Vision API used for OCR (server-side) -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { background: #020617; margin: 0; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); font-family: system-ui, -apple-system, sans-serif; }
+    ::-webkit-scrollbar { display: none; }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type="number"] { -moz-appearance: textfield; }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .pulse { animation: pulse 2s ease-in-out infinite; }
+    @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .slide-in { animation: slideIn 0.2s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .fade-in { animation: fadeIn 0.2s ease-out; }
+    @keyframes progressBar { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
+    @keyframes scan { 0% { top: 0; } 50% { top: 100%; } 100% { top: 0; } }
+    @keyframes loading { 0% { width: 20%; } 50% { width: 80%; } 100% { width: 20%; } }
+    .progress-animated { 
+      background: linear-gradient(90deg, #06b6d4, #8b5cf6, #ec4899, #06b6d4);
+      background-size: 300% 100%;
+      animation: progressBar 2s linear infinite;
     }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
-    const apiKey = process.env.GOOGLE_CLOUD_VISION_KEY;
-    if (!apiKey) {
-      return Response.json({ error: 'Vision API not configured' }, { status: 500 });
-    }
+    // Storage helper
+    const S = {
+      get: (k, d) => { try { return JSON.parse(localStorage.getItem('koha_' + k)) || d } catch { return d } },
+      set: (k, v) => { try { localStorage.setItem('koha_' + k, JSON.stringify(v)) } catch {} }
+    };
 
-    // Call Google Cloud Vision API
-    const response = await fetch(
-      `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          requests: [
-            {
-              image: {
-                content: image // base64 encoded image (without data:image prefix)
-              },
-              features: [
-                {
-                  type: 'TEXT_DETECTION',
-                  maxResults: 1
-                }
-              ]
-            }
-          ]
-        })
+    // Copy to clipboard with iOS fallback
+    const copyToClipboard = async (text) => {
+      try {
+        // Try modern clipboard API first
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (e) {
+        console.log('Clipboard API failed, trying fallback');
       }
+      
+      // Fallback for iOS Safari and older browsers
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        textarea.setAttribute('readonly', '');
+        document.body.appendChild(textarea);
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length); // iOS specific
+        const success = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return success;
+      } catch (e) {
+        console.error('Copy failed:', e);
+        return false;
+      }
+    };
+
+    // HuggingFace API
+    // AI calls now go through our server-side API (key kept secret)
+    const AI_API = '/api/ai';
+
+    // Expense categories with translations
+    const EXPENSE_CATEGORIES = [
+      { id: 'funeral_home', sm: 'Fale Maliu', mi: 'Whare Mate', en: 'Funeral Home', icon: '🏛️', group: 'tangihanga', keywords: ['funeral', 'mortuary', 'chapel', 'death', 'undertaker'] },
+      { id: 'casket', sm: 'Pusa', mi: 'Kāwhena', en: 'Casket', icon: '⚱️', group: 'tangihanga', keywords: ['casket', 'coffin', 'urn', 'burial'] },
+      { id: 'plot', sm: 'Tuugamau', mi: 'Urupā', en: 'Plot', icon: '🪦', group: 'tangihanga', keywords: ['cemetery', 'plot', 'grave', 'burial', 'urupa'] },
+      { id: 'flowers', sm: "Fugālā'au", mi: 'Putiputi', en: 'Flowers', icon: '💐', group: 'tangihanga', keywords: ['flower', 'florist', 'wreath', 'bouquet', 'floral'] },
+      { id: 'venue', sm: 'Nofoaga', mi: 'Marae', en: 'Venue', icon: '🏠', group: 'tangihanga', keywords: ['venue', 'hall', 'marae', 'hire', 'community'] },
+      { id: 'church', sm: 'Lotu', mi: 'Karakia', en: 'Church', icon: '⛪', group: 'tangihanga', keywords: ['church', 'parish', 'minister', 'pastor', 'service', 'donation'] },
+      { id: 'printing', sm: 'Lolomi', mi: 'Pepa', en: 'Service Sheets', icon: '📄', group: 'tangihanga', keywords: ['print', 'printing', 'service sheet', 'program', 'order of service', 'warehouse stationery', 'officeworks'] },
+      { id: 'thankyou', sm: "Fa'afetai", mi: 'Mihi', en: 'Thank You Cards', icon: '💌', group: 'tangihanga', keywords: ['card', 'thank you', 'postage', 'stamps', 'stationery'] },
+      { id: 'clothing', sm: 'Ofu', mi: 'Kākahu', en: 'Clothing', icon: '👔', group: 'tangihanga', keywords: ['clothing', 'dress', 'suit', 'shirt', 'shoes', 'kmart', 'farmers', 'hallensteins', 'glassons'] },
+      { id: 'kai', sm: "Mea'ai", mi: 'Kai', en: 'Groceries', icon: '🛒', group: 'kai', keywords: ['countdown', 'pak n save', 'new world', 'supermarket', 'grocery', 'food', 'woolworths', 'fresh choice', 'four square', 'dairy'] },
+      { id: 'catering', sm: 'Taumafa', mi: 'Hākari', en: 'Catering', icon: '🍽️', group: 'kai', keywords: ['catering', 'caterer', 'buffet', 'restaurant', 'takeaway', 'kfc', 'mcdonald', 'subway', 'pizza', 'sushi'] },
+      { id: 'drinks', sm: 'Vai', mi: 'Inu', en: 'Drinks', icon: '🥤', group: 'kai', keywords: ['drink', 'beverage', 'water', 'juice', 'coffee', 'tea', 'liquor', 'beer', 'wine', 'super liquor', 'liquorland'] },
+      { id: 'petrol', sm: 'Penisini', mi: 'Penehīni', en: 'Petrol', icon: '⛽', group: 'travel', keywords: ['petrol', 'gas', 'fuel', 'z station', 'bp', 'mobil', 'gull', 'caltex', 'npd', 'waitomo'] },
+      { id: 'flights', sm: "Va'alele", mi: 'Rererangi', en: 'Flights', icon: '✈️', group: 'travel', keywords: ['flight', 'air new zealand', 'jetstar', 'airline', 'airport', 'ticket', 'travel'] },
+      { id: 'accommodation', sm: 'Fale Moe', mi: 'Whare Moe', en: 'Accommodation', icon: '🛏️', group: 'travel', keywords: ['hotel', 'motel', 'airbnb', 'accommodation', 'stay', 'booking', 'lodge'] },
+      { id: 'power', sm: 'Eletise', mi: 'Hiko', en: 'Power', icon: '💡', group: 'utilities', keywords: ['power', 'electricity', 'electric', 'meridian', 'genesis', 'contact', 'mercury', 'trustpower'] },
+      { id: 'rubbish', sm: 'Lapisi', mi: 'Para', en: 'Rubbish', icon: '🗑️', group: 'utilities', keywords: ['rubbish', 'waste', 'bin', 'skip', 'cleanup', 'tip', 'dump', 'recycling', 'landfill', 'transfer station', 'refuse', 'disposal', 'trash'] },
+      { id: 'misc', sm: 'Isi Mea', mi: 'Ētahi Atu', en: 'Other', icon: '📦', group: 'other', keywords: [] }
+    ];
+
+    // Gift/Koha categories
+    const GIFT_CATEGORIES = [
+      { id: 'aiga', sm: "Āiga", mi: 'Whānau', en: 'Family', icon: '👨‍👩‍👧‍👦', color: '#ec4899', keywords: ['aunty', 'auntie', 'uncle', 'nana', 'grandma', 'grandpa', 'papa', 'mama', 'mum', 'dad', 'brother', 'sister', 'cousin', 'niece', 'nephew', 'son', 'daughter', 'in-law', 'family', 'whānau', 'aiga', 'tina', 'tama'] },
+      { id: 'uo', sm: 'Uo', mi: 'Hoa', en: 'Friends', icon: '🤝', color: '#8b5cf6', keywords: ['friend', 'mate', 'bro', 'sis', 'cuz', 'bestie', 'crew', 'boys', 'girls', 'gang'] },
+      { id: 'galuega', sm: 'Galuega', mi: 'Mahi', en: 'Work', icon: '💼', color: '#06b6d4', keywords: ['work', 'office', 'team', 'staff', 'company', 'ltd', 'limited', 'inc', 'corp', 'business', 'employer', 'colleague', 'workmate', 'department', 'manager', 'boss'] },
+      { id: 'lotu', sm: 'Lotu', mi: 'Hāhi', en: 'Church', icon: '⛪', color: '#f59e0b', keywords: ['church', 'parish', 'congregation', 'pastor', 'reverend', 'rev', 'father', 'minister', 'bishop', 'st ', 'saint', 'methodist', 'catholic', 'presbyterian', 'baptist', 'assembly', 'efks', 'pipc', 'cccs', 'aog'] },
+      { id: 'nuu', sm: "Nu'u", mi: 'Hapori', en: 'Community', icon: '🏘️', color: '#10b981', keywords: ['community', 'club', 'association', 'group', 'society', 'council', 'committee', 'trust', 'foundation', 'organisation', 'organization', 'sports', 'rugby', 'league', 'netball', 'school', 'college'] },
+      { id: 'isi', sm: 'Isi', mi: 'Ētahi', en: 'Other', icon: '🎁', color: '#64748b', keywords: [] }
+    ];
+
+    const CATEGORY_GROUPS = {
+      tangihanga: { name: 'Maliu • Tangihanga • Funeral', color: '#a855f7', colors: ['#a855f7', '#9333ea', '#7c3aed', '#6d28d9', '#5b21b6', '#4c1d95', '#7e22ce', '#581c87', '#4a044e'] },
+      kai: { name: "Mea'ai • Kai • Food", color: '#f97316', colors: ['#f97316', '#ea580c', '#fb923c'] },
+      travel: { name: 'Malaga • Haerenga • Travel', color: '#06b6d4', colors: ['#06b6d4', '#0891b2', '#22d3ee'] },
+      utilities: { name: 'Utilities', color: '#eab308', colors: ['#eab308', '#ca8a04'] },
+      other: { name: 'Isi Mea • Ētahi Atu • Other', color: '#64748b', colors: ['#64748b'] }
+    };
+
+    // Receipt storage helper
+    const ReceiptStore = {
+      save: (id, data) => { 
+        try { 
+          localStorage.setItem('koha_receipt_' + id, JSON.stringify(data));
+        } catch (e) {
+          console.error('Failed to save receipt:', e);
+        }
+      },
+      get: (id) => { 
+        try { 
+          return JSON.parse(localStorage.getItem('koha_receipt_' + id)) || null;
+        } catch { return null; }
+      },
+      delete: (id) => {
+        try {
+          localStorage.removeItem('koha_receipt_' + id);
+        } catch {}
+      },
+      getAll: () => {
+        const receipts = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key?.startsWith('koha_receipt_')) {
+            const id = key.replace('koha_receipt_', '');
+            const data = ReceiptStore.get(id);
+            if (data) receipts.push({ id, ...data });
+          }
+        }
+        return receipts;
+      }
+    };
+
+    // Cloud sync using our own Netlify Function
+    const CloudSync = {
+      create: async (data) => {
+        try {
+          const res = await fetch('/api/sync', {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+          });
+          
+          console.log('CloudSync.create: Response status', res.status);
+          
+          const json = await res.json();
+          console.log('CloudSync.create: Response', json);
+          
+          if (!res.ok || !json.success) {
+            return { error: json.error || 'unknown', status: res.status };
+          }
+          
+          return json.id;
+        } catch (e) { 
+          console.error('CloudSync.create ERROR:', e);
+          return { error: 'fetch_error', message: e.message };
+        }
+      },
+      
+      get: async (syncId) => {
+        try {
+          console.log('CloudSync.get: Fetching', syncId);
+          const res = await fetch('/api/sync?id=' + syncId.toUpperCase());
+          
+          if (!res.ok) {
+            console.error('CloudSync.get error:', res.status);
+            return null;
+          }
+          
+          const json = await res.json();
+          return json.success ? json.data : null;
+        } catch (e) { 
+          console.error('Get sync failed:', e); 
+          return null; 
+        }
+      },
+      
+      update: async (syncId, newData) => {
+        try {
+          const res = await fetch('/api/sync?id=' + syncId.toUpperCase(), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newData)
+          });
+          
+          const json = await res.json();
+          return json.success ? json.data : false;
+        } catch (e) { 
+          console.error('Update sync failed:', e); 
+          return false; 
+        }
+      }
+    };
+
+    // AI Category Validator
+    const AIValidator = {
+      // Common Samoan/Polynesian names that suggest family/community
+      samoanNames: ['tui', 'sio', 'afa', 'manu', 'tafa', 'latu', 'vili', 'peni', 'simi', 'ioane', 'petelo', 'paulo', 'matai', 'tama', 'sina', 'losa', 'mele', 'ana', 'maria', 'elisapeta', 'fatu', 'leota', 'taufa', 'lolo', 'ese', 'vaa', 'tagaloa', 'savea', 'tuigamala', 'aumua', 'leaupepe', 'tapuai', 'faalogo', 'fuimaono', 'leilua', 'misa', 'papalii', 'tofaeono', 'tuimalealiifano', 'malietoa', 'tupua', 'mataafa'],
+      
+      // Quick validation for gift categories based on donor name
+      suggestGiftCategory: (donorName, existingGifts = []) => {
+        if (!donorName) return null;
+        const name = donorName.toLowerCase().trim();
+        const nameParts = name.split(/\s+/);
+        const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : null;
+        const firstName = nameParts[0];
+        
+        // Check keyword matches first
+        for (const cat of GIFT_CATEGORIES) {
+          if (cat.id === 'isi') continue;
+          for (const kw of cat.keywords) {
+            if (name.includes(kw.toLowerCase())) {
+              return {
+                categoryId: cat.id,
+                category: cat,
+                keyword: kw,
+                confidence: kw.length > 4 ? 85 : 70,
+                reason: `Name contains "${kw}"`
+              };
+            }
+          }
+        }
+        
+        // Check if surname matches someone already in Family
+        if (lastName && lastName.length > 2) {
+          const familyGifts = existingGifts.filter(g => g.category === 'aiga');
+          for (const fg of familyGifts) {
+            const fgParts = fg.donor.toLowerCase().split(/\s+/);
+            const fgLastName = fgParts.length > 1 ? fgParts[fgParts.length - 1] : null;
+            if (fgLastName && fgLastName === lastName) {
+              return {
+                categoryId: 'aiga',
+                category: GIFT_CATEGORIES.find(c => c.id === 'aiga'),
+                confidence: 80,
+                reason: `Same surname as ${fg.donor} (Family)`
+              };
+            }
+          }
+        }
+        
+        // Check for Samoan/Polynesian names - likely family or community
+        const isSamoanName = AIValidator.samoanNames.some(sn => 
+          firstName.includes(sn) || (lastName && lastName.includes(sn)) || name.includes(sn)
+        );
+        if (isSamoanName) {
+          // If we already have gifts, check if any Samoan names are in specific categories
+          const samoanGifts = existingGifts.filter(g => {
+            const gName = g.donor.toLowerCase();
+            return AIValidator.samoanNames.some(sn => gName.includes(sn));
+          });
+          if (samoanGifts.length > 0) {
+            // Follow the pattern of existing Samoan names
+            const mostCommonCat = samoanGifts.reduce((acc, g) => {
+              acc[g.category] = (acc[g.category] || 0) + 1;
+              return acc;
+            }, {});
+            const topCat = Object.entries(mostCommonCat).sort((a, b) => b[1] - a[1])[0];
+            if (topCat && topCat[1] >= 2) {
+              const cat = GIFT_CATEGORIES.find(c => c.id === topCat[0]);
+              if (cat) {
+                return {
+                  categoryId: topCat[0],
+                  category: cat,
+                  confidence: 65,
+                  reason: `Samoan name, similar to others in ${cat.en}`
+                };
+              }
+            }
+          }
+          // Default Samoan names to Family if no pattern
+          return {
+            categoryId: 'aiga',
+            category: GIFT_CATEGORIES.find(c => c.id === 'aiga'),
+            confidence: 60,
+            reason: 'Samoan name - likely whānau'
+          };
+        }
+        
+        return null;
+      },
+
+      // AI-powered gift category validation
+      validateGift: async (gift, currentCategory) => {
+        const prompt = `<s>[INST] You are categorizing a gift/koha donor for a funeral fund tracker in New Zealand.
+
+Donor name: "${gift.donor}"
+Amount: $${gift.amount}
+Current Category: "${currentCategory?.en || 'Other'}"
+Note: "${gift.note || 'none'}"
+
+Available categories:
+- Family (relatives: aunty, uncle, cousin, grandma, in-laws, whānau, āiga)
+- Friends (personal friends, mates, social connections)
+- Work (employers, colleagues, companies, businesses - look for "Ltd", "Limited", "Inc", company names)
+- Church (religious organizations, parishes, ministers, pastors - look for "St ", "Parish", "Church", "Rev")
+- Community (clubs, associations, sports teams, schools, trusts, foundations)
+- Other (if nothing else fits)
+
+Analyze the donor name and any clues. Company names often end in Ltd/Limited. Church donations often include "St" or religious titles.
+
+Respond with ONLY valid JSON:
+{"correct": true/false, "suggested": "category name if incorrect", "confidence": 0-100, "reason": "brief explanation"}
+[/INST]</s>`;
+
+        try {
+          const response = await fetch('/api/ai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'validate',
+              data: { prompt, maxTokens: 150 }
+            })
+          });
+
+          if (!response.ok) return null;
+
+          const apiResult = await response.json();
+          if (!apiResult.success) return null;
+          
+          const text = apiResult.result[0]?.generated_text || '';
+          const jsonMatch = text.match(/\{[^}]+\}/);
+          if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+          }
+          return null;
+        } catch (e) {
+          console.error('AI gift validation failed:', e);
+          return null;
+        }
+      },
+      validateExpense: async (expense, category) => {
+        const isOther = category.id === 'misc';
+        const prompt = `<s>[INST] You are a expense categorization assistant for a funeral/tangihanga fund tracker in New Zealand.
+
+Given this expense:
+- Description: "${expense.description || 'No description'}"
+- Amount: $${expense.amount}
+- Current Category: "${category.en}"${isOther ? ' (This is a catch-all category - try to find a better fit!)' : ''}
+
+Available categories:
+- Funeral Home (funeral services, mortuary)
+- Casket (coffins, urns)
+- Plot (cemetery, burial plots)
+- Flowers (florist, wreaths)
+- Venue (hall hire, marae)
+- Church (donations, minister fees)
+- Service Sheets (printing programs)
+- Thank You Cards (cards, postage)
+- Clothing (funeral attire)
+- Groceries (supermarket food - Countdown, Pak n Save, New World)
+- Catering (restaurants, takeaway, KFC, etc)
+- Drinks (beverages, alcohol)
+- Petrol (fuel - Z, BP, Mobil, Gull)
+- Flights (air travel)
+- Accommodation (hotels, motels)
+- Power (electricity bills)
+- Rubbish (waste disposal, landfill, transfer station, skip bins, cleanup)
+- Other (ONLY if nothing else fits)
+
+${isOther ? 'IMPORTANT: The item is currently in "Other". Look carefully at the description and try to find a more specific category. Only confirm "Other" if no other category fits.' : 'Analyze if the current category is correct.'}
+
+Respond with ONLY valid JSON:
+{"correct": true/false, "suggested": "category name if incorrect", "confidence": 0-100, "reason": "brief explanation"}
+[/INST]</s>`;
+
+        try {
+          const response = await fetch('/api/ai', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'validate',
+              data: { prompt, maxTokens: 150 }
+            })
+          });
+
+          if (!response.ok) {
+            console.error('AI API error');
+            return null;
+          }
+
+          const apiResult = await response.json();
+          if (!apiResult.success) return null;
+          
+          const text = apiResult.result[0]?.generated_text || '';
+          
+          // Extract JSON from response
+          const jsonMatch = text.match(/\{[^}]+\}/);
+          if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+          }
+          return null;
+        } catch (e) {
+          console.error('AI validation failed:', e);
+          return null;
+        }
+      },
+
+      // Local keyword-based validation (fast, no API)
+      quickValidate: (expense, category) => {
+        const desc = (expense.description || '').toLowerCase();
+        
+        // If in "Other/misc" and has a description, be very suspicious
+        const isOther = category.id === 'misc';
+        
+        if (!desc) {
+          return { 
+            correct: !isOther, 
+            confidence: isOther ? 30 : 50, 
+            reason: isOther ? 'Item in Other with no description - may need review' : 'No description to analyze'
+          };
+        }
+
+        // Check if description matches current category keywords
+        const currentMatch = category.keywords?.some(kw => desc.includes(kw.toLowerCase()));
+        
+        // Check all categories for better match
+        let bestMatch = null;
+        let bestScore = 0;
+        let matchedKeyword = '';
+        
+        for (const cat of EXPENSE_CATEGORIES) {
+          if (cat.id === 'misc') continue;
+          for (const kw of (cat.keywords || [])) {
+            if (desc.includes(kw.toLowerCase())) {
+              const score = kw.length; // Longer keywords = more specific = better match
+              if (score > bestScore) {
+                bestScore = score;
+                bestMatch = cat;
+                matchedKeyword = kw;
+              }
+            }
+          }
+        }
+
+        // If we found a better match
+        if (bestMatch && bestMatch.id !== category.id && bestScore > 0) {
+          return {
+            correct: false,
+            suggested: bestMatch.en,
+            suggestedId: bestMatch.id,
+            confidence: Math.min(95, 70 + Math.floor(bestScore / 2)),
+            reason: `Description contains "${matchedKeyword}" which suggests ${bestMatch.en}`
+          };
+        }
+
+        // If in Other but has description, still flag it for AI review
+        if (isOther && desc) {
+          return {
+            correct: false,
+            confidence: 40,
+            needsAI: true,
+            reason: `Item in "Other" with description "${desc}" - AI review recommended`
+          };
+        }
+
+        return { correct: true, confidence: currentMatch ? 85 : 50, reason: currentMatch ? 'Keywords match category' : 'No strong indicators' };
+      }
+    };
+
+    // Format currency
+    const fmt = (n) => {
+      const num = parseFloat(n) || 0;
+      return '$' + num.toLocaleString('en-NZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
+
+    // Format date
+    const fmtDate = (d) => new Date(d).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short' });
+    const fmtDateFull = (d) => new Date(d).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', year: 'numeric' });
+
+    // Generate random sync code
+    const generateSyncCode = () => {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let code = '';
+      for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+      return code;
+    };
+
+    // Pie Chart Component
+    const PieChart = ({ data, size = 200, showLegend = true, title }) => {
+      const total = data.reduce((a, d) => a + d.value, 0);
+      if (total === 0) return null;
+
+      let currentAngle = 0;
+      const paths = data.filter(d => d.value > 0).map((d, i) => {
+        const percentage = d.value / total;
+        const angle = percentage * 360;
+        const startAngle = currentAngle;
+        const endAngle = currentAngle + angle;
+        currentAngle = endAngle;
+
+        const startRad = (startAngle - 90) * Math.PI / 180;
+        const endRad = (endAngle - 90) * Math.PI / 180;
+        const radius = size / 2 - 10;
+        const cx = size / 2;
+        const cy = size / 2;
+
+        const x1 = cx + radius * Math.cos(startRad);
+        const y1 = cy + radius * Math.sin(startRad);
+        const x2 = cx + radius * Math.cos(endRad);
+        const y2 = cy + radius * Math.sin(endRad);
+
+        const largeArc = angle > 180 ? 1 : 0;
+
+        const pathD = percentage === 1 
+          ? `M ${cx} ${cy - radius} A ${radius} ${radius} 0 1 1 ${cx - 0.01} ${cy - radius} Z`
+          : `M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+
+        return (
+          <path
+            key={i}
+            d={pathD}
+            fill={d.color}
+            stroke="#0f172a"
+            strokeWidth="2"
+          />
+        );
+      });
+
+      // Dynamic font size based on total length
+      const totalStr = fmt(total);
+      const fontSize = totalStr.length > 8 ? 12 : totalStr.length > 6 ? 14 : 18;
+
+      return (
+        <div className="flex flex-col items-center">
+          {title && <p className="text-slate-400 text-sm font-medium mb-2">{title}</p>}
+          <svg width={size} height={size} className="drop-shadow-lg">
+            {paths}
+            <circle cx={size/2} cy={size/2} r={size/4} fill="#0f172a" />
+            <text x={size/2} y={size/2} textAnchor="middle" dy=".1em" fill="white" fontWeight="bold" style={{ fontSize: fontSize + 'px' }}>{totalStr}</text>
+            <text x={size/2} y={size/2 + 14} textAnchor="middle" fill="#94a3b8" style={{ fontSize: '10px' }}>total</text>
+          </svg>
+          {showLegend && (
+            <div className="mt-3 space-y-1 w-full max-w-xs">
+              {data.filter(d => d.value > 0).map((d, i) => (
+                <div key={i} className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: d.color }} />
+                    <span className="text-slate-300 truncate max-w-[100px]">{d.label}</span>
+                  </div>
+                  <span className="text-slate-400 text-xs whitespace-nowrap">{fmt(d.value)} ({((d.value/total)*100).toFixed(0)}%)</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // Progress Bar Component
+    const ProgressBar = ({ progress, status, details }) => (
+      <div className="bg-slate-900 rounded-xl p-4 mb-4">
+        <div className="flex justify-between items-center mb-2">
+          <span className="text-sm text-white font-medium">{status}</span>
+          <span className="text-sm text-cyan-400">{progress}%</span>
+        </div>
+        <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+          <div 
+            className="h-full progress-animated rounded-full transition-all duration-300"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+        {details && <p className="text-slate-500 text-xs mt-2">{details}</p>}
+      </div>
     );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Vision API error:', errorText);
-      return Response.json({ error: 'Vision API failed', details: errorText }, { status: 500 });
-    }
+    const App = () => {
+      // Check if we're returning from a scan reload
+      const [screen, setScreen] = useState(() => {
+        const returnTo = sessionStorage.getItem('return_to_screen');
+        if (returnTo) {
+          sessionStorage.removeItem('return_to_screen');
+          return returnTo;
+        }
+        return 'home';
+      });
+      const [gifts, setGifts] = useState(() => S.get('gifts', []));
+      const [expenses, setExpenses] = useState(() => S.get('expenses', []));
+      const [transfers, setTransfers] = useState(() => S.get('transfers', []));
+      const [editingItem, setEditingItem] = useState(null);
+      const [syncCode, setSyncCode] = useState(() => S.get('syncCode', null));
+      const [syncBinId, setSyncBinId] = useState(() => S.get('syncBinId', null));
+      const [syncing, setSyncing] = useState(false);
+      const [lastSync, setLastSync] = useState(() => S.get('lastSync', null));
+      const [scanResult, setScanResult] = useState(null);
+      const [scanning, setScanning] = useState(false);
+      const [catLang, setCatLang] = useState(() => S.get('catLang', 'all'));
+      
+      // Validation state
+      const [validationResults, setValidationResults] = useState(() => S.get('validationResults', {}));
+      const [giftValidationResults, setGiftValidationResults] = useState(() => S.get('giftValidationResults', {}));
+      const [isValidating, setIsValidating] = useState(false);
+      const [validationProgress, setValidationProgress] = useState(0);
+      const [validationStatus, setValidationStatus] = useState('');
+      const [validationDetails, setValidationDetails] = useState('');
 
-    const result = await response.json();
-    
-    // Extract the full text from the response
-    const textAnnotations = result.responses?.[0]?.textAnnotations;
-    if (!textAnnotations || textAnnotations.length === 0) {
-      return Response.json({ error: 'No text found in image', text: '' }, { status: 200 });
-    }
+      // Category name helper
+      const getCategoryById = (id) => EXPENSE_CATEGORIES.find(c => c.id === id) || EXPENSE_CATEGORIES[EXPENSE_CATEGORIES.length - 1];
+      const getGiftCategoryById = (id) => GIFT_CATEGORIES.find(c => c.id === id) || GIFT_CATEGORIES[GIFT_CATEGORIES.length - 1];
+      const getCategoryName = (cat) => {
+        if (catLang === 'all') return `${cat.sm} • ${cat.mi} • ${cat.en}`;
+        return cat[catLang] || cat.en;
+      };
 
-    // First annotation contains the full text
-    const fullText = textAnnotations[0].description;
+      // Persist data locally
+      useEffect(() => { S.set('gifts', gifts) }, [gifts]);
+      useEffect(() => { S.set('expenses', expenses) }, [expenses]);
+      useEffect(() => { S.set('transfers', transfers) }, [transfers]);
+      useEffect(() => { S.set('syncCode', syncCode) }, [syncCode]);
+      useEffect(() => { S.set('syncBinId', syncBinId) }, [syncBinId]);
+      useEffect(() => { S.set('lastSync', lastSync) }, [lastSync]);
+      useEffect(() => { S.set('catLang', catLang) }, [catLang]);
+      useEffect(() => { S.set('validationResults', validationResults) }, [validationResults]);
+      useEffect(() => { S.set('giftValidationResults', giftValidationResults) }, [giftValidationResults]);
 
-    return Response.json({ 
-      success: true, 
-      text: fullText,
-      // Also return individual words/blocks if needed
-      blocks: textAnnotations.slice(1).map(t => ({
-        text: t.description,
-        bounds: t.boundingPoly?.vertices
-      }))
-    });
+      // Sync from cloud on page load if connected
+      const initialSyncDone = useRef(false);
+      useEffect(() => {
+        if (syncBinId && !initialSyncDone.current) {
+          initialSyncDone.current = true;
+          syncFromCloud();
+        }
+      }, [syncBinId]);
 
-  } catch (error) {
-    console.error('Vision function error:', error);
-    return Response.json({ error: error.message }, { status: 500 });
-  }
-};
+      // Sync to cloud when page closes/hides
+      useEffect(() => {
+        if (!syncBinId) return;
+        
+        const handleSync = () => {
+          if (syncBinId && !syncing) {
+            const data = JSON.stringify({ gifts, expenses, transfers });
+            navigator.sendBeacon?.(`/api/sync?id=${syncBinId}`, new Blob([data], { type: 'application/json' }));
+          }
+        };
+        
+        const handleVisibilityChange = () => {
+          if (document.visibilityState === 'hidden') {
+            handleSync();
+          }
+        };
+        
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('beforeunload', handleSync);
+        
+        return () => {
+          document.removeEventListener('visibilitychange', handleVisibilityChange);
+          window.removeEventListener('beforeunload', handleSync);
+        };
+      }, [syncBinId, gifts, expenses, transfers, syncing]);
+
+      // Instant sync to cloud after any data change (debounced 1 second)
+      const syncTimeout = useRef(null);
+      const dataInitialized = useRef(false);
+      useEffect(() => {
+        if (!syncBinId) return;
+        
+        if (!dataInitialized.current) {
+          dataInitialized.current = true;
+          return;
+        }
+        
+        if (syncTimeout.current) clearTimeout(syncTimeout.current);
+        
+        syncTimeout.current = setTimeout(() => {
+          console.log('Auto-syncing after data change...');
+          syncToCloud();
+        }, 1000);
+        
+        return () => {
+          if (syncTimeout.current) clearTimeout(syncTimeout.current);
+        };
+      }, [gifts, expenses, transfers, syncBinId]);
+
+      // Poll for other users' changes every 10 seconds
+      useEffect(() => {
+        if (!syncBinId) return;
+        
+        const pollInterval = setInterval(() => {
+          if (!syncing) {
+            console.log('Polling for updates...');
+            syncFromCloud();
+          }
+        }, 10000);
+        
+        return () => clearInterval(pollInterval);
+      }, [syncBinId, syncing]);
+
+      // Validate new expenses automatically
+      useEffect(() => {
+        const newExpenses = expenses.filter(e => !validationResults[e.id]);
+        if (newExpenses.length > 0 && !isValidating) {
+          validateExpenses(newExpenses, false);
+        }
+      }, [expenses]);
+
+      // Sync functions
+      const syncToCloud = async () => {
+        if (!syncBinId || syncing) return;
+        console.log('Syncing to cloud...');
+        setSyncing(true);
+        const success = await CloudSync.update(syncBinId, { gifts, expenses, transfers });
+        if (success) {
+          setLastSync(Date.now());
+          console.log('Sync to cloud complete');
+        } else {
+          console.error('Sync to cloud failed');
+        }
+        setSyncing(false);
+      };
+
+      const syncFromCloud = async () => {
+        if (!syncBinId || syncing) return;
+        console.log('Syncing from cloud...');
+        setSyncing(true);
+        const data = await CloudSync.get(syncBinId);
+        if (data) {
+          const mergeArrays = (local, cloud) => {
+            const map = new Map();
+            [...local, ...cloud].forEach(item => map.set(item.id, item));
+            return Array.from(map.values());
+          };
+          setGifts(mergeArrays(gifts, data.gifts || []));
+          setExpenses(mergeArrays(expenses, data.expenses || []));
+          setTransfers(mergeArrays(transfers, data.transfers || []));
+          setLastSync(Date.now());
+          console.log('Sync from cloud complete');
+        } else {
+          console.error('Sync from cloud failed or no data');
+        }
+        setSyncing(false);
+      };
+
+      const createSync = async () => {
+        setSyncing(true);
+        try {
+          const binId = await CloudSync.create({ gifts, expenses, transfers });
+          if (binId && typeof binId === 'string') {
+            // The server returns a 5-letter code - use it as both the display code AND the API ID
+            setSyncCode(binId);
+            setSyncBinId(binId);
+            setLastSync(Date.now());
+            setSyncing(false);
+            return binId;
+          }
+        } catch (e) {
+          console.error('createSync error:', e);
+        }
+        setSyncing(false);
+        return null;
+      };
+
+      // Validation function
+      const validateExpenses = async (expensesToValidate = expenses, useAI = false, includeGifts = false) => {
+        try {
+          setIsValidating(true);
+          setValidationProgress(0);
+          setValidationStatus('🔍 Starting validation...');
+          
+          const results = { ...validationResults };
+          const giftResults = { ...giftValidationResults };
+          const giftsToValidate = includeGifts ? gifts : [];
+          
+          // Filter out already dismissed items - don't re-validate them
+          const expensesToActuallyValidate = expensesToValidate.filter(e => {
+            const existing = results[e.id];
+            return !existing?.dismissed; // Skip if dismissed
+          });
+          
+          const totalExpenses = expensesToActuallyValidate.length;
+          const totalGifts = giftsToValidate.length;
+          const total = totalExpenses + totalGifts;
+          let processed = 0;
+          
+          // Validate expenses
+          for (let i = 0; i < totalExpenses; i++) {
+            const expense = expensesToActuallyValidate[i];
+            const category = getCategoryById(expense.category);
+            
+            processed++;
+            setValidationProgress(Math.round((processed / total) * 100));
+            setValidationStatus(`🔍 Expenses ${i + 1}/${totalExpenses}`);
+            setValidationDetails(expense.description || category.en);
+
+          // Quick local validation first
+          let result = AIValidator.quickValidate(expense, category);
+          
+          // If quick validation is uncertain, in Other category, or needs AI - use AI
+          const shouldUseAI = useAI && (!result.correct || result.confidence < 70 || result.needsAI || category.id === 'misc');
+          
+          if (shouldUseAI) {
+            setValidationStatus(`🤖 AI analyzing expense ${i + 1}/${totalExpenses}`);
+            const aiResult = await AIValidator.validateExpense(expense, category);
+            if (aiResult) {
+              result = {
+                ...result,
+                aiAnalyzed: true,
+                aiSuggested: aiResult.suggested,
+                aiConfidence: aiResult.confidence,
+                aiReason: aiResult.reason,
+                correct: aiResult.correct
+              };
+              
+              // Map AI suggestion to category ID
+              if (!aiResult.correct && aiResult.suggested) {
+                const suggestedCat = EXPENSE_CATEGORIES.find(c => 
+                  c.en.toLowerCase() === aiResult.suggested.toLowerCase()
+                );
+                if (suggestedCat) {
+                  result.suggestedId = suggestedCat.id;
+                  result.suggested = suggestedCat.en;
+                }
+              }
+            }
+            // Small delay to avoid rate limiting
+            await new Promise(r => setTimeout(r, 500));
+          }
+          
+          // Preserve dismissed flag if it was set
+          const existingResult = results[expense.id];
+          results[expense.id] = {
+            ...result,
+            validatedAt: Date.now(),
+            originalCategory: expense.category,
+            dismissed: existingResult?.dismissed || false
+          };
+        }
+        
+        // Validate gifts (if AI mode and includeGifts)
+        if (useAI && includeGifts) {
+          for (let i = 0; i < totalGifts; i++) {
+            const gift = giftsToValidate[i];
+            const category = getGiftCategoryById(gift.category);
+            
+            processed++;
+            setValidationProgress(Math.round((processed / total) * 100));
+            setValidationStatus(`🎁 Koha ${i + 1}/${totalGifts}`);
+            setValidationDetails(gift.donor);
+
+            // Quick local check first
+            const quickSuggestion = AIValidator.suggestGiftCategory(gift.donor, gifts);
+            let result = { correct: true, confidence: 50 };
+            
+            // If in Other or quick check suggests different category
+            const isOther = !gift.category || gift.category === 'isi';
+            const quickMismatch = quickSuggestion && quickSuggestion.categoryId !== gift.category;
+            
+            if (isOther || quickMismatch) {
+              setValidationStatus(`🤖 AI analyzing koha ${i + 1}/${totalGifts}`);
+              const aiResult = await AIValidator.validateGift(gift, category);
+              
+              if (aiResult) {
+                result = {
+                  aiAnalyzed: true,
+                  correct: aiResult.correct,
+                  aiSuggested: aiResult.suggested,
+                  aiConfidence: aiResult.confidence,
+                  aiReason: aiResult.reason
+                };
+                
+                // Map AI suggestion to gift category ID
+                if (!aiResult.correct && aiResult.suggested) {
+                  const suggestedCat = GIFT_CATEGORIES.find(c => 
+                    c.en.toLowerCase() === aiResult.suggested.toLowerCase()
+                  );
+                  if (suggestedCat) {
+                    result.suggestedId = suggestedCat.id;
+                    result.suggested = suggestedCat.en;
+                  }
+                }
+              } else if (quickSuggestion) {
+                // Fall back to quick suggestion if AI fails
+                result = {
+                  correct: false,
+                  suggestedId: quickSuggestion.categoryId,
+                  suggested: quickSuggestion.category.en,
+                  confidence: quickSuggestion.confidence,
+                  reason: quickSuggestion.reason || (quickSuggestion.keyword ? `Name contains "${quickSuggestion.keyword}"` : 'Pattern match')
+                };
+              }
+              
+              await new Promise(r => setTimeout(r, 500));
+            }
+            
+            giftResults[gift.id] = {
+              ...result,
+              validatedAt: Date.now(),
+              originalCategory: gift.category
+            };
+          }
+        }
+        
+        setValidationResults(results);
+        setGiftValidationResults(giftResults);
+        setIsValidating(false);
+        setValidationStatus('✅ Validation complete!');
+        setValidationDetails(`Checked ${totalExpenses} expenses${includeGifts ? ` + ${totalGifts} koha` : ''}`);
+        
+        setTimeout(() => {
+          setValidationStatus('');
+          setValidationDetails('');
+        }, 3000);
+        } catch (err) {
+          console.error('Validation error:', err);
+          setIsValidating(false);
+          setValidationStatus('❌ Error during validation');
+          setValidationDetails('Please try again');
+          setTimeout(() => {
+            setValidationStatus('');
+            setValidationDetails('');
+          }, 3000);
+        }
+      };
+
+      // Apply suggestion
+      const applySuggestion = (expenseId, suggestedCategoryId) => {
+        setExpenses(prev => prev.map(e => 
+          e.id === expenseId ? { ...e, category: suggestedCategoryId } : e
+        ));
+        setValidationResults(prev => ({
+          ...prev,
+          [expenseId]: { ...prev[expenseId], correct: true, applied: true }
+        }));
+      };
+
+      // Dismiss suggestion
+      const dismissSuggestion = (expenseId) => {
+        setValidationResults(prev => ({
+          ...prev,
+          [expenseId]: { ...prev[expenseId], correct: true, dismissed: true }
+        }));
+      };
+
+      // Apply gift suggestion
+      const applyGiftSuggestion = (giftId, suggestedCategoryId) => {
+        setGifts(prev => prev.map(g => 
+          g.id === giftId ? { ...g, category: suggestedCategoryId } : g
+        ));
+        setGiftValidationResults(prev => ({
+          ...prev,
+          [giftId]: { ...prev[giftId], correct: true, applied: true }
+        }));
+      };
+
+      // Dismiss gift suggestion
+      const dismissGiftSuggestion = (giftId) => {
+        setGiftValidationResults(prev => ({
+          ...prev,
+          [giftId]: { ...prev[giftId], correct: true, dismissed: true }
+        }));
+      };
+
+      // Global API logger - saves to localStorage for debugging
+      const apiLog = (msg) => {
+        const timestamp = new Date().toLocaleTimeString();
+        const entry = '[' + timestamp + '] ' + msg;
+        console.log('[API] ' + msg);
+        try {
+          const existing = localStorage.getItem('scan_debug_log') || '';
+          localStorage.setItem('scan_debug_log', existing + '\n' + entry);
+        } catch (e) {}
+      };
+
+      // Receipt scanning with Tesseract.js (runs in browser, no API needed)
+      // Receipt scanning with Google Cloud Vision API (much more accurate than Tesseract)
+      const scanReceipt = async (imageData, onProgress) => {
+        apiLog('=== scanReceipt called (Google Cloud Vision) ===');
+        apiLog('Image data length: ' + (imageData?.length || 0) + ' chars (' + Math.round(imageData?.length / 1024) + 'KB)');
+        setScanning(true);
+        setScanResult(null);
+        
+        try {
+          // Progress simulation for UI feedback
+          if (onProgress) onProgress(10);
+          apiLog('Sending to Google Cloud Vision...');
+          
+          // Call our server-side Vision API function
+          const response = await fetch('/api/vision', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: imageData })
+          });
+          
+          if (onProgress) onProgress(60);
+          
+          const result = await response.json();
+          
+          if (!response.ok || result.error) {
+            apiLog('Vision API error: ' + (result.error || 'Unknown error') + (result.details ? ' - ' + result.details.substring(0, 200) : '') + (result.code ? ' (code: ' + result.code + ')' : ''));
+            throw new Error(result.error || 'Vision API failed');
+          }
+          
+          if (onProgress) onProgress(80);
+          
+          const text = result.text || '';
+          apiLog('OCR complete. Text length: ' + text.length);
+          apiLog('Raw text preview: ' + text.substring(0, 300).replace(/\n/g, ' | '));
+          
+          // Parse the text to extract receipt info
+          const parsedData = parseReceiptText(text);
+          apiLog('Parsed: total=' + parsedData.total + ', vendor=' + parsedData.vendor + ', category=' + parsedData.category);
+          if (parsedData.subtotal) apiLog('Subtotal: ' + parsedData.subtotal);
+          if (parsedData.gst) apiLog('GST: ' + parsedData.gst);
+          if (parsedData.discount) apiLog('Discount: ' + parsedData.discount);
+          if (parsedData.paymentMethod) apiLog('Payment: ' + parsedData.paymentMethod);
+          
+          if (onProgress) onProgress(100);
+          
+          const finalResult = {
+            total: parsedData.total,
+            vendor: parsedData.vendor,
+            date: parsedData.date,
+            time: parsedData.time,
+            items: parsedData.items,
+            category: parsedData.category,
+            // Receipt details
+            subtotal: parsedData.subtotal,
+            gst: parsedData.gst,
+            discount: parsedData.discount,
+            cashOut: parsedData.cashOut,
+            change: parsedData.change,
+            paymentMethod: parsedData.paymentMethod,
+            cardLastFour: parsedData.cardLastFour,
+            // Meta
+            rawText: text,
+            originalImage: imageData,
+            scannedAt: new Date().toISOString()
+          };
+
+          // SAVE TO STORAGE IMMEDIATELY before any state updates
+          // Use both localStorage AND sessionStorage for redundancy
+          try {
+            const toSave = JSON.stringify({
+              ...finalResult,
+              savedAt: Date.now()
+            });
+            localStorage.setItem('pending_scan_result', toSave);
+            sessionStorage.setItem('pending_scan_result', toSave);
+            // Also save that we should return to addExpense screen
+            sessionStorage.setItem('return_to_screen', 'addExpense');
+            apiLog('Saved result to both localStorage and sessionStorage');
+            
+            // Small delay then reload to ensure write completes
+            apiLog('Will reload in 100ms for recovery...');
+            setTimeout(() => {
+              window.location.reload();
+            }, 100);
+            return finalResult;
+          } catch (e) {
+            apiLog('Failed to save result: ' + e.message);
+          }
+
+          apiLog('Final result: total=' + finalResult.total + ', vendor=' + finalResult.vendor);
+          setScanResult(finalResult);
+          setScanning(false);
+          return finalResult;
+          
+        } catch (e) {
+          apiLog('ERROR in scanReceipt: ' + e.message);
+          setScanning(false);
+          
+          return {
+            total: 0,
+            vendor: '',
+            category: 'misc',
+            originalImage: imageData,
+            scannedAt: new Date().toISOString(),
+            error: 'Scan failed - please enter details manually'
+          };
+        }
+      };
+      
+      // Parse receipt text to extract structured data
+      // RECEIPT STRUCTURE:
+      // - TOP (lines 1-5): Store name, address, phone number
+      // - MIDDLE: Item names with prices (usually "Item Name    $X.XX")
+      // - BOTTOM (last 10-15 lines): Subtotal, GST, TOTAL, payment method, date/time
+      // The TOTAL is almost ALWAYS near the bottom, labeled "TOTAL", "EFTPOS", "PAID", etc.
+      
+      const parseReceiptText = (text) => {
+        // Clean up OCR artifacts and normalize text
+        const cleanText = text
+          .replace(/[|]/g, 'I')  // Common OCR error
+          .replace(/[oO](?=\d)/g, '0')  // O before numbers is probably 0
+          .replace(/(?<=\d)[oO]/g, '0')  // O after numbers is probably 0
+          .replace(/\s{2,}/g, ' ');  // Multiple spaces to single
+        
+        const lines = cleanText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        
+        let total = 0;
+        let vendor = '';
+        let date = null;
+        let time = null;
+        let category = 'misc';
+        const items = [];
+        
+        // =====================
+        // STEP 1: FIND THE TOTAL
+        // =====================
+        // The total is the most important field. It's usually:
+        // - Near the BOTTOM of the receipt (last 15 lines)
+        // - Labeled with: TOTAL, EFTPOS, PAID, AMOUNT, DUE, BALANCE, SALE
+        // - The LARGEST amount on the receipt (but we prefer labeled amounts)
+        
+        const totalKeywords = ['total', 'eftpos', 'paid', 'amount', 'due', 'balance', 'sale total', 'grand total', 'payment', 'tender', 'visa', 'mastercard', 'debit', 'credit'];
+        const excludeKeywords = ['subtotal', 'sub total', 'sub-total', 'gst', 'tax', 'change', 'rounding', 'discount', 'savings'];
+        
+        // Look in bottom 15 lines first (where total usually is)
+        const bottomLines = lines.slice(-15);
+        let foundLabeledTotal = false;
+        
+        for (const line of bottomLines.reverse()) {
+          const lineLower = line.toLowerCase();
+          
+          // Skip lines with exclude keywords
+          if (excludeKeywords.some(kw => lineLower.includes(kw))) continue;
+          
+          // Check if line has a total keyword
+          const hasKeyword = totalKeywords.some(kw => lineLower.includes(kw));
+          
+          if (hasKeyword) {
+            // Extract amount from this line
+            const amountMatch = line.match(/\$?\s*(\d{1,4})[.,](\d{2})\b/);
+            if (amountMatch) {
+              const amount = parseFloat(amountMatch[1] + '.' + amountMatch[2]);
+              if (amount > 0 && amount < 50000) {
+                total = amount;
+                foundLabeledTotal = true;
+                break;
+              }
+            }
+          }
+        }
+        
+        // If no labeled total found, find the largest amount in bottom section
+        if (!foundLabeledTotal) {
+          const amounts = [];
+          for (const line of bottomLines) {
+            const matches = line.match(/\$?\s*(\d{1,4})[.,](\d{2})\b/g);
+            if (matches) {
+              for (const m of matches) {
+                const clean = m.replace(/[$\s]/g, '').replace(',', '.');
+                const amount = parseFloat(clean);
+                if (amount > 0.50 && amount < 50000) {
+                  amounts.push(amount);
+                }
+              }
+            }
+          }
+          if (amounts.length > 0) {
+            // Take the largest amount
+            total = Math.max(...amounts);
+          }
+        }
+        
+        // If still no total, search entire receipt for largest amount
+        if (total === 0) {
+          const allAmounts = [];
+          for (const line of lines) {
+            const matches = line.match(/\$?\s*(\d{1,4})[.,](\d{2})\b/g);
+            if (matches) {
+              for (const m of matches) {
+                const clean = m.replace(/[$\s]/g, '').replace(',', '.');
+                const amount = parseFloat(clean);
+                if (amount > 0.50 && amount < 50000) {
+                  allAmounts.push(amount);
+                }
+              }
+            }
+          }
+          if (allAmounts.length > 0) {
+            total = Math.max(...allAmounts);
+          }
+        }
+        
+        // =====================
+        // STEP 2: FIND THE VENDOR/STORE NAME
+        // =====================
+        // The store name is usually:
+        // - In the FIRST 1-3 lines
+        // - NOT a date, time, address, phone, or generic word
+        // - Often in ALL CAPS or is a known store name
+        
+        const storePatterns = {
+          'countdown': { name: 'Countdown', category: 'kai' },
+          'pak n save': { name: 'Pak n Save', category: 'kai' },
+          'paknsave': { name: 'Pak n Save', category: 'kai' },
+          'pak\'n\'save': { name: 'Pak n Save', category: 'kai' },
+          'new world': { name: 'New World', category: 'kai' },
+          'fresh choice': { name: 'Fresh Choice', category: 'kai' },
+          'woolworths': { name: 'Woolworths', category: 'kai' },
+          'four square': { name: 'Four Square', category: 'kai' },
+          'foursquare': { name: 'Four Square', category: 'kai' },
+          'supervalue': { name: 'SuperValue', category: 'kai' },
+          'kfc': { name: 'KFC', category: 'catering' },
+          'mcdonald': { name: 'McDonalds', category: 'catering' },
+          'burger king': { name: 'Burger King', category: 'catering' },
+          'wendy': { name: 'Wendys', category: 'catering' },
+          'subway': { name: 'Subway', category: 'catering' },
+          'pizza hut': { name: 'Pizza Hut', category: 'catering' },
+          'domino': { name: 'Dominos', category: 'catering' },
+          'starbucks': { name: 'Starbucks', category: 'catering' },
+          'super liquor': { name: 'Super Liquor', category: 'drinks' },
+          'liquorland': { name: 'Liquorland', category: 'drinks' },
+          'bottle-o': { name: 'Bottle-O', category: 'drinks' },
+          'henry\'s': { name: 'Henrys', category: 'drinks' },
+          'z energy': { name: 'Z Energy', category: 'petrol' },
+          'z station': { name: 'Z Energy', category: 'petrol' },
+          'bp ': { name: 'BP', category: 'petrol' },
+          'bp connect': { name: 'BP', category: 'petrol' },
+          'mobil': { name: 'Mobil', category: 'petrol' },
+          'gull': { name: 'Gull', category: 'petrol' },
+          'caltex': { name: 'Caltex', category: 'petrol' },
+          'npd': { name: 'NPD', category: 'petrol' },
+          'waitomo': { name: 'Waitomo', category: 'petrol' },
+          'kmart': { name: 'Kmart', category: 'clothing' },
+          'farmers': { name: 'Farmers', category: 'clothing' },
+          'warehouse stationery': { name: 'Warehouse Stationery', category: 'printing' },
+          'the warehouse': { name: 'The Warehouse', category: 'clothing' },
+          'mitre 10': { name: 'Mitre 10', category: 'misc' },
+          'mitre10': { name: 'Mitre 10', category: 'misc' },
+          'bunnings': { name: 'Bunnings', category: 'misc' },
+          'briscoes': { name: 'Briscoes', category: 'misc' },
+          'rebel sport': { name: 'Rebel Sport', category: 'misc' }
+        };
+        
+        // Check first 8 lines for known store names
+        const headerText = lines.slice(0, 8).join(' ').toLowerCase();
+        for (const [pattern, info] of Object.entries(storePatterns)) {
+          if (headerText.includes(pattern)) {
+            vendor = info.name;
+            category = info.category;
+            break;
+          }
+        }
+        
+        // If no known store, look for the store name in first few lines
+        if (!vendor) {
+          // Words/patterns to SKIP (these are NOT store names)
+          const skipPatterns = [
+            /^cash\s*(receipt)?$/i,
+            /^(tax\s*)?invoice$/i,
+            /^receipt$/i,
+            /^eftpos$/i,
+            /^customer\s*copy$/i,
+            /^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}/,  // Date pattern
+            /^\d{1,2}:\d{2}/,  // Time pattern
+            /^tel[:\s]/i,
+            /^phone[:\s]/i,
+            /^ph[:\s]/i,
+            /^fax[:\s]/i,
+            /^gst[:\s#]/i,
+            /^abn[:\s]/i,
+            /^nzbn[:\s]/i,
+            /www\./i,
+            /\.co\.nz/i,
+            /\.com/i,
+            /^[A-Z]{2,3}\d{5,}/,  // Looks like a code
+            /^\d+$/,  // Just numbers
+            /^[\W]+$/,  // Just symbols
+          ];
+          
+          for (const line of lines.slice(0, 6)) {
+            const trimmed = line.trim();
+            
+            // Skip very short or very long lines
+            if (trimmed.length < 3 || trimmed.length > 50) continue;
+            
+            // Skip lines matching skip patterns
+            const shouldSkip = skipPatterns.some(p => p.test(trimmed));
+            if (shouldSkip) continue;
+            
+            // Skip lines that look like addresses (have street type words)
+            if (/\b(street|st|road|rd|avenue|ave|drive|dr|lane|ln|place|pl|way|crescent|cres|terrace|tce)\b/i.test(trimmed)) continue;
+            
+            // Skip lines that are mostly numbers (like phone numbers)
+            const digitCount = (trimmed.match(/\d/g) || []).length;
+            if (digitCount > trimmed.length * 0.5) continue;
+            
+            // This looks like a store name!
+            vendor = trimmed.substring(0, 40);
+            break;
+          }
+        }
+        
+        // Still no vendor? Try to find an address line and use that
+        if (!vendor) {
+          for (const line of lines.slice(0, 10)) {
+            const addressMatch = line.match(/^(\d+\s+[A-Za-z].{5,30})/);
+            if (addressMatch && /\b(street|st|road|rd|avenue|ave|drive|dr)\b/i.test(addressMatch[1])) {
+              vendor = addressMatch[1].trim();
+              break;
+            }
+          }
+        }
+        
+        // Final fallback
+        if (!vendor) {
+          vendor = 'Receipt';
+        }
+        
+        // =====================
+        // STEP 3: FIND THE DATE
+        // =====================
+        // Date is usually in format: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+        // Often on the same line as time, near top or bottom
+        
+        const datePatterns = [
+          /(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})/,  // DD/MM/YYYY
+          /(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\b/,  // DD/MM/YY
+          /(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})/,  // YYYY/MM/DD
+        ];
+        
+        for (const line of lines) {
+          // Skip lines that look like item lines (have prices)
+          if (/\$\s*\d+\.\d{2}/.test(line) && !/date/i.test(line)) continue;
+          
+          for (const pattern of datePatterns) {
+            const match = line.match(pattern);
+            if (match) {
+              let day, month, year;
+              
+              if (match[1].length === 4) {
+                // YYYY/MM/DD format
+                year = match[1];
+                month = match[2].padStart(2, '0');
+                day = match[3].padStart(2, '0');
+              } else if (match[3].length === 4) {
+                // DD/MM/YYYY format
+                day = match[1].padStart(2, '0');
+                month = match[2].padStart(2, '0');
+                year = match[3];
+              } else {
+                // DD/MM/YY format
+                day = match[1].padStart(2, '0');
+                month = match[2].padStart(2, '0');
+                year = '20' + match[3];
+              }
+              
+              // Validate date parts
+              const dayNum = parseInt(day);
+              const monthNum = parseInt(month);
+              if (dayNum >= 1 && dayNum <= 31 && monthNum >= 1 && monthNum <= 12) {
+                date = `${year}-${month}-${day}`;
+                break;
+              }
+            }
+          }
+          if (date) break;
+        }
+        
+        // =====================
+        // STEP 4: FIND THE TIME
+        // =====================
+        const timePattern = /\b(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(am|pm))?\b/i;
+        for (const line of lines) {
+          const match = line.match(timePattern);
+          if (match) {
+            let hour = parseInt(match[1]);
+            const minute = match[2];
+            
+            // Handle AM/PM
+            if (match[4]) {
+              if (match[4].toLowerCase() === 'pm' && hour < 12) hour += 12;
+              if (match[4].toLowerCase() === 'am' && hour === 12) hour = 0;
+            }
+            
+            // Validate time
+            if (hour >= 0 && hour <= 23) {
+              time = `${hour.toString().padStart(2, '0')}:${minute}`;
+              break;
+            }
+          }
+        }
+        
+        // =====================
+        // STEP 5: EXTRACT RECEIPT DETAILS
+        // =====================
+        // Subtotal, GST, discount, change, payment method
+        
+        let subtotal = 0;
+        let gst = 0;
+        let discount = 0;
+        let cashOut = 0;
+        let change = 0;
+        let paymentMethod = '';
+        let cardLastFour = '';
+        
+        // Payment method detection
+        const paymentKeywords = {
+          'visa': 'Visa',
+          'mastercard': 'Mastercard',
+          'eftpos': 'EFTPOS',
+          'debit': 'Debit Card',
+          'credit': 'Credit Card',
+          'cash': 'Cash',
+          'paywave': 'Paywave',
+          'contactless': 'Contactless'
+        };
+        
+        for (const line of lines) {
+          const lineLower = line.toLowerCase();
+          
+          // Subtotal
+          if (/sub.?total/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) subtotal = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // GST/Tax
+          if (/\bgst\b|goods.*service.*tax|\btax\b/i.test(line) && !/gst\s*(no|number|#|reg)/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) gst = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Discount/Savings
+          if (/discount|savings?|less|off|promo/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) discount = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Cash out
+          if (/cash\s*out/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) cashOut = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Change
+          if (/\bchange\b/i.test(line) && !/no change|keep.*change/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) change = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Payment method
+          for (const [keyword, method] of Object.entries(paymentKeywords)) {
+            if (lineLower.includes(keyword)) {
+              paymentMethod = method;
+              break;
+            }
+          }
+          
+          // Card last 4 digits (e.g., "****1234" or "XXXX1234")
+          const cardMatch = line.match(/[*xX]{4}\s*(\d{4})/);
+          if (cardMatch) cardLastFour = cardMatch[1];
+        }
+        
+        // =====================
+        // STEP 6: EXTRACT ITEMS (optional)
+        // =====================
+        // Items are usually in the middle, format: "Item Name    $X.XX"
+        const itemPattern = /^(.{3,35}?)\s+\$?\s*(\d{1,3})[.,](\d{2})\s*$/;
+        for (const line of lines) {
+          // Skip lines with total keywords
+          if (/total|subtotal|gst|tax|eftpos|paid|change/i.test(line)) continue;
+          
+          const match = line.match(itemPattern);
+          if (match) {
+            const price = parseFloat(match[2] + '.' + match[3]);
+            if (price > 0 && price < total && price < 1000) {
+              items.push({ name: match[1].trim(), price });
+            }
+          }
+        }
+        
+        return { 
+          total, 
+          vendor, 
+          date, 
+          time, 
+          category, 
+          items,
+          // Receipt details
+          subtotal: subtotal || null,
+          gst: gst || null,
+          discount: discount || null,
+          cashOut: cashOut || null,
+          change: change || null,
+          paymentMethod: paymentMethod || null,
+          cardLastFour: cardLastFour || null
+        };
+      };
+
+      // Calculated values
+      const totals = useMemo(() => {
+        const giftsCash = gifts.filter(g => g.method === 'cash').reduce((a, g) => a + g.amount, 0);
+        const giftsBank = gifts.filter(g => g.method === 'bank').reduce((a, g) => a + g.amount, 0);
+        const expensesCash = expenses.filter(e => e.method === 'cash').reduce((a, e) => a + e.amount, 0);
+        const expensesBank = expenses.filter(e => e.method === 'bank').reduce((a, e) => a + e.amount, 0);
+        const transferredToBank = transfers.reduce((a, t) => a + t.amount, 0);
+        
+        return {
+          giftsTotal: giftsCash + giftsBank,
+          giftsCash, giftsBank,
+          expensesTotal: expensesCash + expensesBank,
+          expensesCash, expensesBank,
+          transferredToBank,
+          balanceCash: giftsCash - expensesCash - transferredToBank,
+          balanceBank: giftsBank - expensesBank + transferredToBank,
+          balanceTotal: (giftsCash + giftsBank) - (expensesCash + expensesBank)
+        };
+      }, [gifts, expenses, transfers]);
+
+      // Unique donors for autocomplete
+      const donors = useMemo(() => [...new Set(gifts.map(g => g.donor))].sort(), [gifts]);
+
+      // Flagged expenses (incorrect categories)
+      const flaggedExpenses = useMemo(() => {
+        return expenses.filter(e => {
+          const result = validationResults[e.id];
+          return result && !result.correct && !result.dismissed && !result.applied;
+        });
+      }, [expenses, validationResults]);
+
+      // Flagged gifts (incorrect categories)
+      const flaggedGifts = useMemo(() => {
+        return gifts.filter(g => {
+          const result = giftValidationResults[g.id];
+          return result && !result.correct && !result.dismissed && !result.applied;
+        });
+      }, [gifts, giftValidationResults]);
+
+      // CRUD operations
+      const addGift = (gift) => setGifts(prev => [...prev, { ...gift, id: Date.now(), createdAt: new Date().toISOString() }]);
+      const addExpense = (expense) => setExpenses(prev => [...prev, { ...expense, id: Date.now(), createdAt: new Date().toISOString() }]);
+      const addTransfer = (transfer) => setTransfers(prev => [...prev, { ...transfer, id: Date.now(), createdAt: new Date().toISOString() }]);
+      const deleteGift = (id) => setGifts(prev => prev.filter(g => g.id !== id));
+      const deleteExpense = (id) => setExpenses(prev => prev.filter(e => e.id !== id));
+      const deleteTransfer = (id) => setTransfers(prev => prev.filter(t => t.id !== id));
+      const updateGift = (id, updates) => setGifts(prev => prev.map(g => g.id === id ? { ...g, ...updates } : g));
+      const updateExpense = (id, updates) => setExpenses(prev => prev.map(e => e.id === id ? { ...e, ...updates } : e));
+
+      // Category Language Selector Component
+      const CatLangSelector = ({ showLabel = true }) => {
+        const [showMenu, setShowMenu] = useState(false);
+        const options = [
+          { code: 'all', label: 'All Languages', short: '🌏' },
+          { code: 'sm', label: 'Gagana Samoa', short: '🇼🇸' },
+          { code: 'mi', label: 'Te Reo Māori', short: '🇳🇿' },
+          { code: 'en', label: 'English', short: '🇬🇧' }
+        ];
+        const current = options.find(o => o.code === catLang);
+        
+        return (
+          <div className="relative">
+            <button onClick={() => setShowMenu(!showMenu)} className="flex items-center gap-1 px-2 py-1 bg-slate-800 rounded-lg text-xs">
+              <span>{current?.short}</span>
+              {showLabel && <span className="text-slate-400 uppercase">{catLang === 'all' ? 'ALL' : catLang}</span>}
+            </button>
+            {showMenu && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
+                <div className="absolute right-0 top-full mt-1 bg-slate-800 rounded-xl overflow-hidden z-50 border border-slate-700 min-w-[160px]">
+                  {options.map(o => (
+                    <button key={o.code} onClick={() => { setCatLang(o.code); setShowMenu(false); }} className={`w-full px-4 py-3 text-left flex items-center gap-3 ${catLang === o.code ? 'bg-cyan-600' : 'hover:bg-slate-700 active:bg-slate-600'}`}>
+                      <span>{o.short}</span>
+                      <span className="text-white text-sm">{o.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      };
+
+      // Navigation
+      const Nav = () => (
+        <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-4 py-2 pb-6">
+          <div className="flex justify-around max-w-md mx-auto">
+            {[
+              { id: 'home', icon: '🏠', label: 'Fale' },
+              { id: 'gifts', icon: '🎁', label: 'Koha' },
+              { id: 'expenses', icon: '💸', label: 'Tau' },
+              { id: 'analytics', icon: '📊', label: 'Aotelega' }
+            ].map(n => (
+              <button
+                key={n.id}
+                onClick={() => setScreen(n.id)}
+                className={`flex flex-col items-center gap-1 px-4 py-1 rounded-xl transition-colors relative ${
+                  screen === n.id || 
+                  (n.id === 'gifts' && ['addGift', 'editGift'].includes(screen)) ||
+                  (n.id === 'expenses' && ['addExpense', 'editExpense', 'addTransfer'].includes(screen))
+                    ? 'text-cyan-400' : 'text-slate-500'
+                }`}
+              >
+                <span className="text-xl">{n.icon}</span>
+                <span className="text-xs">{n.label}</span>
+                {n.id === 'analytics' && (flaggedExpenses.length + flaggedGifts.length) > 0 && (
+                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full text-xs text-white flex items-center justify-center">
+                    {flaggedExpenses.length + flaggedGifts.length}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+
+      // Home Screen (keeping it shorter for space)
+      const Home = () => {
+        const recentTransactions = useMemo(() => {
+          const all = [
+            ...gifts.map(g => ({ ...g, type: 'gift' })),
+            ...expenses.map(e => ({ ...e, type: 'expense' })),
+            ...transfers.map(t => ({ ...t, type: 'transfer' }))
+          ];
+          return all.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
+        }, [gifts, expenses, transfers]);
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <p className="text-slate-500 text-sm">Āiga • Whānau • Family</p>
+                  <h1 className="text-2xl font-bold">Meaalofa • Koha Tracker</h1>
+                </div>
+                <button onClick={() => setScreen('sync')} className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 rounded-lg text-sm">
+                  {syncing ? <span className="spin">🔄</span> : syncBinId ? <span className="text-green-400">☁️</span> : <span className="text-slate-500">☁️</span>}
+                  <span className="text-slate-400">{syncBinId || 'Sync'}</span>
+                </button>
+              </div>
+
+              {/* Validation Status Bar */}
+              {(isValidating || validationStatus) && (
+                <ProgressBar progress={validationProgress} status={validationStatus} details={validationDetails} />
+              )}
+
+              {/* Flagged Items Alert */}
+              {(flaggedExpenses.length > 0 || flaggedGifts.length > 0) && !isValidating && (
+                <button
+                  onClick={() => setScreen('analytics')}
+                  className="w-full bg-amber-900/30 border border-amber-700/50 rounded-xl p-3 mb-4 flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-amber-400">⚠️</span>
+                    <span className="text-amber-200 text-sm">
+                      {flaggedExpenses.length + flaggedGifts.length} item{(flaggedExpenses.length + flaggedGifts.length) !== 1 ? 's' : ''} may need review
+                    </span>
+                  </div>
+                  <span className="text-amber-400 text-sm">View →</span>
+                </button>
+              )}
+
+              {/* Balance Card */}
+              <div className="bg-gradient-to-br from-cyan-600 to-teal-600 rounded-2xl p-5 mb-4">
+                <p className="text-cyan-100 text-sm mb-1">Tupe Totoe • Toenga • Balance</p>
+                <p className={`text-4xl font-bold ${totals.balanceTotal < 0 ? 'text-red-200' : 'text-white'}`}>{fmt(totals.balanceTotal)}</p>
+                <div className="flex gap-6 mt-4">
+                  <div>
+                    <p className="text-cyan-100 text-xs">Tipi • Moni • Cash</p>
+                    <p className={`text-lg font-semibold ${totals.balanceCash < 0 ? 'text-red-200' : 'text-white'}`}>{fmt(totals.balanceCash)}</p>
+                  </div>
+                  <div>
+                    <p className="text-cyan-100 text-xs">Faletupe • Pēke • Bank</p>
+                    <p className={`text-lg font-semibold ${totals.balanceBank < 0 ? 'text-red-200' : 'text-white'}`}>{fmt(totals.balanceBank)}</p>
+                  </div>
+                </div>
+                {totals.balanceCash > 0 && (
+                  <button onClick={() => setScreen('addTransfer')} className="mt-4 w-full py-2 bg-white/20 rounded-xl text-sm font-medium flex items-center justify-center gap-2">
+                    💵 → 🏦 Tupe i le Faletupe • Deposit Cash
+                  </button>
+                )}
+              </div>
+
+              {/* Quick Stats */}
+              <div className="grid grid-cols-2 gap-3 mb-6">
+                <div className="bg-slate-900 rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-green-400">↓</span>
+                    <span className="text-slate-400 text-sm">Maua • Whiwhi • In</span>
+                  </div>
+                  <p className="text-2xl font-bold text-green-400">{fmt(totals.giftsTotal)}</p>
+                  <p className="text-slate-500 text-xs mt-1">{gifts.length} meaalofa • koha</p>
+                </div>
+                <div className="bg-slate-900 rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-red-400">↑</span>
+                    <span className="text-slate-400 text-sm">Fa'aalu • Utu • Out</span>
+                  </div>
+                  <p className="text-2xl font-bold text-red-400">{fmt(totals.expensesTotal)}</p>
+                  <p className="text-slate-500 text-xs mt-1">{expenses.length} tau • utu</p>
+                </div>
+              </div>
+
+              {/* Quick Actions */}
+              <div className="grid grid-cols-2 gap-3 mb-6">
+                <button onClick={() => setScreen('addGift')} className="bg-gradient-to-br from-green-600 to-emerald-600 rounded-xl p-4 text-left active:scale-95 transition-transform">
+                  <span className="text-2xl">🎁</span>
+                  <p className="font-bold mt-2">Fa'aopopo Meaalofa</p>
+                  <p className="text-green-100 text-xs">Tāpiri Koha • Add Gift</p>
+                </button>
+                <button onClick={() => setScreen('addExpense')} className="bg-gradient-to-br from-orange-600 to-red-600 rounded-xl p-4 text-left active:scale-95 transition-transform">
+                  <span className="text-2xl">💸</span>
+                  <p className="font-bold mt-2">Fa'aopopo Tau</p>
+                  <p className="text-orange-100 text-xs">Tāpiri Utu • Add Expense</p>
+                </button>
+              </div>
+
+              {/* Recent */}
+              {recentTransactions.length > 0 && (
+                <div>
+                  <p className="text-slate-400 text-sm font-medium mb-3">TALU AI NEI • RECENT</p>
+                  <div className="space-y-2">
+                    {recentTransactions.map(tx => {
+                      const giftCat = tx.type === 'gift' ? getGiftCategoryById(tx.category) : null;
+                      return (
+                        <div key={tx.id} onClick={() => { if (tx.type !== 'transfer') { setEditingItem(tx); setScreen(tx.type === 'gift' ? 'editGift' : 'editExpense'); }}} className={`bg-slate-900 rounded-xl p-3 flex items-center gap-3 ${tx.type !== 'transfer' ? 'active:bg-slate-800' : ''}`}>
+                          <div 
+                            className={`w-10 h-10 rounded-full flex items-center justify-center`}
+                            style={tx.type === 'gift' && giftCat ? { backgroundColor: giftCat.color + '30' } : {}}
+                          >
+                            <span>{tx.type === 'gift' ? (giftCat?.icon || '🎁') : tx.type === 'transfer' ? '🏦' : getCategoryById(tx.category).icon}</span>
+                          </div>
+                          <div className="flex-1">
+                            <p className="font-medium text-white">{tx.type === 'gift' ? tx.donor : tx.type === 'transfer' ? 'Cash → Bank' : tx.description || getCategoryName(getCategoryById(tx.category))}</p>
+                            <p className="text-slate-500 text-xs">{fmtDate(tx.date)} • {tx.type === 'transfer' ? '💵→🏦' : tx.method === 'cash' ? '💵' : '🏦'}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className={`font-bold ${tx.type === 'gift' ? 'text-green-400' : tx.type === 'transfer' ? 'text-blue-400' : 'text-red-400'}`}>
+                              {tx.type === 'gift' ? '+' : tx.type === 'transfer' ? '' : '-'}{fmt(tx.amount)}
+                            </p>
+                            {tx.type === 'expense' && validationResults[tx.id] && !validationResults[tx.id].correct && !validationResults[tx.id].dismissed && (
+                              <span className="text-amber-400 text-xs">⚠️</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Analytics Screen (Revamped)
+      const Analytics = () => {
+        const [tab, setTab] = useState('overview');
+        const [selectedCategory, setSelectedCategory] = useState(null);
+
+        // Expense data by group
+        const expensesByGroup = useMemo(() => {
+          const groups = {};
+          expenses.forEach(e => {
+            const cat = getCategoryById(e.category);
+            const group = cat.group;
+            groups[group] = (groups[group] || 0) + e.amount;
+          });
+          return Object.entries(CATEGORY_GROUPS).map(([id, info]) => ({
+            id,
+            label: info.name.split(' • ').pop(),
+            value: groups[id] || 0,
+            color: info.color
+          })).filter(g => g.value > 0);
+        }, [expenses]);
+
+        // Expense data by category
+        const expensesByCategory = useMemo(() => {
+          const cats = {};
+          expenses.forEach(e => {
+            cats[e.category] = (cats[e.category] || 0) + e.amount;
+          });
+          return Object.entries(cats)
+            .map(([id, value]) => {
+              const cat = getCategoryById(id);
+              const group = CATEGORY_GROUPS[cat.group];
+              const colorIndex = EXPENSE_CATEGORIES.filter(c => c.group === cat.group).findIndex(c => c.id === id);
+              return {
+                id,
+                label: cat.en,
+                icon: cat.icon,
+                value,
+                color: group.colors[colorIndex % group.colors.length]
+              };
+            })
+            .sort((a, b) => b.value - a.value);
+        }, [expenses]);
+
+        // Cash flow data
+        const cashFlowData = useMemo(() => [
+          { label: 'Koha In', value: totals.giftsTotal, color: '#22c55e' },
+          { label: 'Expenses Out', value: totals.expensesTotal, color: '#ef4444' }
+        ], [totals]);
+
+        // Gifts by method
+        const giftsByMethod = useMemo(() => [
+          { label: 'Cash', value: totals.giftsCash, color: '#22c55e' },
+          { label: 'Bank', value: totals.giftsBank, color: '#3b82f6' }
+        ], [totals]);
+
+        // Gifts by category
+        const giftsByCategory = useMemo(() => {
+          const cats = {};
+          gifts.forEach(g => {
+            const catId = g.category || 'isi';
+            cats[catId] = (cats[catId] || 0) + g.amount;
+          });
+          return GIFT_CATEGORIES
+            .map(cat => ({
+              id: cat.id,
+              label: cat.en,
+              icon: cat.icon,
+              value: cats[cat.id] || 0,
+              color: cat.color
+            }))
+            .filter(c => c.value > 0);
+        }, [gifts]);
+
+        // Timeline data (by date)
+        const timelineData = useMemo(() => {
+          const all = [
+            ...gifts.map(g => ({ ...g, type: 'gift' })),
+            ...expenses.map(e => ({ ...e, type: 'expense' })),
+            ...transfers.map(t => ({ ...t, type: 'transfer' }))
+          ].sort((a, b) => new Date(a.date) - new Date(b.date));
+          
+          const byDate = {};
+          all.forEach(item => {
+            const date = item.date;
+            if (!byDate[date]) byDate[date] = { date, gifts: 0, expenses: 0, transfers: 0, items: [] };
+            if (item.type === 'gift') byDate[date].gifts += item.amount;
+            else if (item.type === 'expense') byDate[date].expenses += item.amount;
+            else byDate[date].transfers += item.amount;
+            byDate[date].items.push(item);
+          });
+          
+          return Object.values(byDate);
+        }, [gifts, expenses, transfers]);
+
+        // Donor rankings
+        const donorRankings = useMemo(() => {
+          const totals = {};
+          gifts.forEach(g => { totals[g.donor] = (totals[g.donor] || 0) + g.amount; });
+          return Object.entries(totals).sort((a, b) => b[1] - a[1]);
+        }, [gifts]);
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <div className="flex justify-between items-center mb-4">
+                <h1 className="text-2xl font-bold">Aotelega • Summary</h1>
+                <CatLangSelector showLabel={false} />
+              </div>
+
+              {/* Validation Status */}
+              {(isValidating || validationStatus) && (
+                <ProgressBar progress={validationProgress} status={validationStatus} details={validationDetails} />
+              )}
+
+              {/* Tabs */}
+              <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+                {[
+                  { id: 'overview', label: '📊 Overview' },
+                  { id: 'validation', label: `⚠️ Review${(flaggedExpenses.length + flaggedGifts.length) ? ` (${flaggedExpenses.length + flaggedGifts.length})` : ''}` },
+                  { id: 'timeline', label: '📅 Timeline' },
+                  { id: 'donors', label: '🎁 Donors' }
+                ].map(t => (
+                  <button
+                    key={t.id}
+                    onClick={() => setTab(t.id)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap ${tab === t.id ? 'bg-cyan-600 text-white' : 'bg-slate-900 text-slate-400'}`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Overview Tab */}
+              {tab === 'overview' && (
+                <div className="space-y-6">
+                  {/* Balance Summary */}
+                  <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl p-4 border border-slate-700">
+                    <div className="grid grid-cols-3 gap-4 text-center">
+                      <div>
+                        <p className="text-slate-500 text-xs">In</p>
+                        <p className="text-green-400 font-bold text-lg">{fmt(totals.giftsTotal)}</p>
+                      </div>
+                      <div>
+                        <p className="text-slate-500 text-xs">Out</p>
+                        <p className="text-red-400 font-bold text-lg">{fmt(totals.expensesTotal)}</p>
+                      </div>
+                      <div>
+                        <p className="text-slate-500 text-xs">Balance</p>
+                        <p className={`font-bold text-lg ${totals.balanceTotal < 0 ? 'text-red-400' : 'text-cyan-400'}`}>{fmt(totals.balanceTotal)}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Cash Flow Pie */}
+                  <div className="bg-slate-900 rounded-xl p-4">
+                    <PieChart data={cashFlowData} size={180} title="💰 CASH FLOW" />
+                  </div>
+
+                  {/* Expenses by Group */}
+                  {expensesByGroup.length > 0 && (
+                    <div className="bg-slate-900 rounded-xl p-4">
+                      <PieChart data={expensesByGroup} size={180} title="📊 EXPENSES BY TYPE" />
+                    </div>
+                  )}
+
+                  {/* Expenses by Category */}
+                  {expensesByCategory.length > 0 && (
+                    <div className="bg-slate-900 rounded-xl p-4">
+                      <p className="text-slate-400 text-sm font-medium mb-3 text-center">📋 ALL CATEGORIES</p>
+                      <div className="space-y-3">
+                        {expensesByCategory.map(cat => {
+                          const pct = (cat.value / totals.expensesTotal) * 100;
+                          return (
+                            <button 
+                              key={cat.id} 
+                              onClick={() => setSelectedCategory(cat.id)}
+                              className="w-full text-left active:bg-slate-800 rounded-lg p-1 -m-1"
+                            >
+                              <div className="flex justify-between mb-1">
+                                <span className="text-sm text-white flex items-center gap-2">
+                                  <span>{cat.icon}</span>{cat.label}
+                                </span>
+                                <span className="text-slate-400 text-sm">{fmt(cat.value)} ({pct.toFixed(0)}%)</span>
+                              </div>
+                              <div className="h-2 bg-slate-800 rounded-full">
+                                <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: cat.color }} />
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Gifts by Method */}
+                  {totals.giftsTotal > 0 && (
+                    <div className="bg-slate-900 rounded-xl p-4">
+                      <PieChart data={giftsByMethod} size={180} title="🎁 KOHA BY METHOD" />
+                    </div>
+                  )}
+
+                  {/* Gifts by Category */}
+                  {giftsByCategory.length > 0 && (
+                    <div className="bg-slate-900 rounded-xl p-4">
+                      <PieChart data={giftsByCategory} size={180} title="🎁 KOHA BY SOURCE" />
+                    </div>
+                  )}
+
+                  {/* Category Drill-Down Modal */}
+                  {selectedCategory && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setSelectedCategory(null)}>
+                      <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm fade-in" />
+                      <div 
+                        className="relative bg-slate-900 w-full max-w-md rounded-2xl p-5 max-h-[70vh] overflow-auto border border-slate-700 shadow-2xl slide-in"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex justify-between items-center mb-4">
+                          <div className="flex items-center gap-2">
+                            <span className="text-2xl">{getCategoryById(selectedCategory).icon}</span>
+                            <h2 className="text-lg font-bold text-white">{getCategoryName(getCategoryById(selectedCategory))}</h2>
+                          </div>
+                          <button onClick={() => setSelectedCategory(null)} className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:bg-slate-700">×</button>
+                        </div>
+                        
+                        {(() => {
+                          const categoryExpenses = expenses.filter(e => e.category === selectedCategory).sort((a, b) => new Date(b.date) - new Date(a.date));
+                          const categoryTotal = categoryExpenses.reduce((a, e) => a + e.amount, 0);
+                          
+                          return (
+                            <>
+                              <div className="bg-slate-800/50 rounded-xl p-3 mb-4">
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">{categoryExpenses.length} expense{categoryExpenses.length !== 1 ? 's' : ''}</span>
+                                  <span className="text-red-400 font-bold">{fmt(categoryTotal)}</span>
+                                </div>
+                              </div>
+                              
+                              <div className="space-y-2">
+                                {categoryExpenses.map(e => {
+                                  const result = validationResults[e.id];
+                                  const flagged = result && !result.correct && !result.dismissed && !result.applied;
+                                  
+                                  return (
+                                    <div 
+                                      key={e.id} 
+                                      onClick={() => { setSelectedCategory(null); setEditingItem(e); setScreen('editExpense'); }}
+                                      className={`bg-slate-800 rounded-xl p-3 active:bg-slate-700 cursor-pointer ${flagged ? 'border border-amber-500/50' : ''}`}
+                                    >
+                                      <div className="flex justify-between items-start">
+                                        <div>
+                                          <p className="text-white font-medium">{e.description || 'No description'}</p>
+                                          <p className="text-slate-500 text-sm">{fmtDateFull(e.date)} • {e.method === 'cash' ? '💵' : '🏦'}</p>
+                                        </div>
+                                        <div className="text-right">
+                                          <p className="text-red-400 font-bold">{fmt(e.amount)}</p>
+                                          {flagged && <span className="text-amber-400 text-xs">⚠️</span>}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              
+                              {categoryExpenses.length === 0 && (
+                                <p className="text-slate-500 text-center py-8">No expenses in this category</p>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Validation Tab */}
+              {tab === 'validation' && (
+                <div className="space-y-4">
+                  {/* Validation Controls */}
+                  <div className="bg-slate-900 rounded-xl p-4">
+                    <p className="text-slate-400 text-sm font-medium mb-3">🤖 AI VALIDATION</p>
+                    <div className="grid grid-cols-2 gap-2 mb-2">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); validateExpenses(expenses, false, false); }}
+                        disabled={isValidating}
+                        className="py-3 bg-slate-800 rounded-xl text-sm font-medium disabled:opacity-50"
+                      >
+                        {isValidating ? '🔄 Running...' : '⚡ Quick Scan'}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); validateExpenses(expenses, true, true); }}
+                        disabled={isValidating}
+                        className="py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-xl text-sm font-medium disabled:opacity-50"
+                      >
+                        {isValidating ? '🔄 Running...' : '🤖 Deep AI Scan'}
+                      </button>
+                    </div>
+                    <p className="text-slate-600 text-xs">Quick scan: expenses only (keywords). Deep scan: expenses + koha (AI powered).</p>
+                  </div>
+
+                  {/* Validation Stats */}
+                  <div className="bg-slate-900 rounded-xl p-4">
+                    <p className="text-slate-500 text-xs font-medium mb-3">EXPENSES</p>
+                    <div className="grid grid-cols-3 gap-4 text-center mb-4">
+                      <div>
+                        <p className="text-2xl font-bold text-green-400">{Object.values(validationResults).filter(r => r.correct).length}</p>
+                        <p className="text-slate-500 text-xs">✓ OK</p>
+                      </div>
+                      <div>
+                        <p className="text-2xl font-bold text-amber-400">{flaggedExpenses.length}</p>
+                        <p className="text-slate-500 text-xs">⚠️ Flag</p>
+                      </div>
+                      <div>
+                        <p className="text-2xl font-bold text-slate-400">{expenses.length - Object.keys(validationResults).length}</p>
+                        <p className="text-slate-500 text-xs">⏳ Pending</p>
+                      </div>
+                    </div>
+                    {Object.keys(giftValidationResults).length > 0 && (
+                      <>
+                        <p className="text-slate-500 text-xs font-medium mb-3 pt-3 border-t border-slate-800">KOHA</p>
+                        <div className="grid grid-cols-3 gap-4 text-center">
+                          <div>
+                            <p className="text-2xl font-bold text-green-400">{Object.values(giftValidationResults).filter(r => r.correct).length}</p>
+                            <p className="text-slate-500 text-xs">✓ OK</p>
+                          </div>
+                          <div>
+                            <p className="text-2xl font-bold text-amber-400">{flaggedGifts.length}</p>
+                            <p className="text-slate-500 text-xs">⚠️ Flag</p>
+                          </div>
+                          <div>
+                            <p className="text-2xl font-bold text-slate-400">{gifts.length - Object.keys(giftValidationResults).length}</p>
+                            <p className="text-slate-500 text-xs">⏳ Pending</p>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Flagged Expenses */}
+                  {flaggedExpenses.length > 0 && (
+                    <div className="bg-slate-900 rounded-xl p-4">
+                      <p className="text-amber-400 text-sm font-medium mb-3">⚠️ EXPENSES TO REVIEW ({flaggedExpenses.length})</p>
+                      <div className="space-y-3">
+                        {flaggedExpenses.map(expense => {
+                          const cat = getCategoryById(expense.category);
+                          const result = validationResults[expense.id];
+                          const suggestedCat = result.suggestedId ? getCategoryById(result.suggestedId) : null;
+                          
+                          return (
+                            <div key={expense.id} className="bg-slate-800 rounded-xl p-3 slide-in">
+                              <div className="flex items-start justify-between mb-2">
+                                <div>
+                                  <p className="text-white font-medium">{expense.description || cat.en}</p>
+                                  <p className="text-slate-500 text-xs">{fmtDateFull(expense.date)} • {fmt(expense.amount)}</p>
+                                </div>
+                                <span className="text-amber-400 bg-amber-400/20 px-2 py-1 rounded text-xs">
+                                  {result.confidence || result.aiConfidence}%
+                                </span>
+                              </div>
+                              
+                              <div className="flex items-center gap-2 mb-2 text-sm flex-wrap">
+                                <span className="flex items-center gap-1 text-white">
+                                  {cat.icon} {cat.en}
+                                </span>
+                                <span className="text-slate-600">→</span>
+                                <span className="flex items-center gap-1 text-cyan-400">
+                                  {suggestedCat?.icon} {result.suggested || result.aiSuggested}
+                                </span>
+                              </div>
+                              
+                              <p className="text-slate-500 text-xs mb-3">{result.reason || result.aiReason}</p>
+                              
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); if (result.suggestedId) applySuggestion(expense.id, result.suggestedId); }}
+                                  disabled={!result.suggestedId}
+                                  className="flex-1 py-2 bg-green-600 rounded-lg text-sm font-medium disabled:opacity-50"
+                                >
+                                  ✓ Apply
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); dismissSuggestion(expense.id); }}
+                                  className="flex-1 py-2 bg-slate-700 rounded-lg text-sm font-medium"
+                                >
+                                  ✕ Keep
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Flagged Gifts */}
+                  {flaggedGifts.length > 0 && (
+                    <div className="bg-slate-900 rounded-xl p-4">
+                      <p className="text-pink-400 text-sm font-medium mb-3">🎁 KOHA TO REVIEW ({flaggedGifts.length})</p>
+                      <div className="space-y-3">
+                        {flaggedGifts.map(gift => {
+                          const cat = getGiftCategoryById(gift.category);
+                          const result = giftValidationResults[gift.id];
+                          const suggestedCat = result.suggestedId ? getGiftCategoryById(result.suggestedId) : null;
+                          
+                          return (
+                            <div key={gift.id} className="bg-slate-800 rounded-xl p-3 slide-in">
+                              <div className="flex items-start justify-between mb-2">
+                                <div>
+                                  <p className="text-white font-medium">{gift.donor}</p>
+                                  <p className="text-slate-500 text-xs">{fmtDateFull(gift.date)} • {fmt(gift.amount)}</p>
+                                </div>
+                                <span className="text-pink-400 bg-pink-400/20 px-2 py-1 rounded text-xs">
+                                  {result.confidence || result.aiConfidence}%
+                                </span>
+                              </div>
+                              
+                              <div className="flex items-center gap-2 mb-2 text-sm flex-wrap">
+                                <span className="flex items-center gap-1 text-white">
+                                  {cat.icon} {cat.en}
+                                </span>
+                                <span className="text-slate-600">→</span>
+                                <span className="flex items-center gap-1" style={{ color: suggestedCat?.color || '#06b6d4' }}>
+                                  {suggestedCat?.icon} {result.suggested || result.aiSuggested}
+                                </span>
+                              </div>
+                              
+                              <p className="text-slate-500 text-xs mb-3">{result.reason || result.aiReason}</p>
+                              
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); if (result.suggestedId) applyGiftSuggestion(gift.id, result.suggestedId); }}
+                                  disabled={!result.suggestedId}
+                                  className="flex-1 py-2 bg-green-600 rounded-lg text-sm font-medium disabled:opacity-50"
+                                >
+                                  ✓ Apply
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); dismissGiftSuggestion(gift.id); }}
+                                  className="flex-1 py-2 bg-slate-700 rounded-lg text-sm font-medium"
+                                >
+                                  ✕ Keep
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {flaggedExpenses.length === 0 && flaggedGifts.length === 0 && (Object.keys(validationResults).length > 0 || Object.keys(giftValidationResults).length > 0) && (() => {
+                    // Check if all items have been scanned
+                    const unscannedExpenses = expenses.filter(e => !validationResults[e.id]).length;
+                    const unscannedGifts = gifts.filter(g => !giftValidationResults[g.id]).length;
+                    const expensesInOther = expenses.filter(e => e.category === 'misc').length;
+                    const giftsInOther = gifts.filter(g => !g.category || g.category === 'isi').length;
+                    const needsDeepScan = expensesInOther > 0 || giftsInOther > 0;
+                    
+                    if (unscannedExpenses > 0 || unscannedGifts > 0) {
+                      return (
+                        <div className="bg-slate-900 rounded-xl p-6 text-center">
+                          <span className="text-4xl mb-2 block">📋</span>
+                          <p className="text-slate-300 font-medium">Partial scan complete</p>
+                          <p className="text-slate-500 text-sm mt-1">
+                            {unscannedExpenses > 0 && `${unscannedExpenses} expense${unscannedExpenses !== 1 ? 's' : ''} `}
+                            {unscannedExpenses > 0 && unscannedGifts > 0 && '+ '}
+                            {unscannedGifts > 0 && `${unscannedGifts} koha `}
+                            not yet checked
+                          </p>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); validateExpenses(expenses, true, true); }}
+                            disabled={isValidating}
+                            className="mt-3 px-4 py-2 bg-purple-600 rounded-lg text-sm font-medium"
+                          >
+                            🤖 Run Full Scan
+                          </button>
+                        </div>
+                      );
+                    }
+                    
+                    if (needsDeepScan) {
+                      return (
+                        <div className="bg-amber-900/30 border border-amber-700/50 rounded-xl p-6 text-center">
+                          <span className="text-4xl mb-2 block">🤔</span>
+                          <p className="text-amber-300 font-medium">Some items in "Other"</p>
+                          <p className="text-slate-500 text-sm mt-1">
+                            {expensesInOther > 0 && `${expensesInOther} expense${expensesInOther !== 1 ? 's' : ''} `}
+                            {expensesInOther > 0 && giftsInOther > 0 && '+ '}
+                            {giftsInOther > 0 && `${giftsInOther} koha `}
+                            might have better categories
+                          </p>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); validateExpenses(expenses, true, true); }}
+                            disabled={isValidating}
+                            className="mt-3 px-4 py-2 bg-purple-600 rounded-lg text-sm font-medium"
+                          >
+                            🤖 Deep Scan
+                          </button>
+                        </div>
+                      );
+                    }
+                    
+                    return (
+                      <div className="bg-green-900/30 border border-green-700/50 rounded-xl p-6 text-center">
+                        <span className="text-4xl mb-2 block">✅</span>
+                        <p className="text-green-400 font-medium">All categories look correct!</p>
+                        <p className="text-slate-500 text-sm mt-1">
+                          {expenses.length} expense{expenses.length !== 1 ? 's' : ''} + {gifts.length} koha checked
+                        </p>
+                      </div>
+                    );
+                  })()}
+
+                  {Object.keys(validationResults).length === 0 && Object.keys(giftValidationResults).length === 0 && (
+                    <div className="bg-slate-900 rounded-xl p-6 text-center">
+                      <span className="text-4xl mb-2 block">🔍</span>
+                      <p className="text-slate-400">No validation run yet</p>
+                      <p className="text-slate-500 text-sm mt-1 mb-3">
+                        {expenses.length} expense{expenses.length !== 1 ? 's' : ''} + {gifts.length} koha to check
+                      </p>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); validateExpenses(expenses, true, true); }}
+                        disabled={isValidating || (expenses.length === 0 && gifts.length === 0)}
+                        className="px-4 py-2 bg-purple-600 rounded-lg text-sm font-medium disabled:opacity-50"
+                      >
+                        🤖 Run Deep Scan
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Timeline Tab */}
+              {tab === 'timeline' && (
+                <div className="space-y-3">
+                  {timelineData.length > 0 ? timelineData.map(day => (
+                    <div key={day.date} className="bg-slate-900 rounded-xl p-4">
+                      <div className="flex justify-between items-center mb-3">
+                        <p className="text-white font-medium">{fmtDateFull(day.date)}</p>
+                        <div className="flex gap-3 text-sm">
+                          {day.gifts > 0 && <span className="text-green-400">+{fmt(day.gifts)}</span>}
+                          {day.expenses > 0 && <span className="text-red-400">-{fmt(day.expenses)}</span>}
+                          {day.transfers > 0 && <span className="text-blue-400">↔{fmt(day.transfers)}</span>}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        {day.items.map(item => {
+                          const cat = item.type === 'expense' ? getCategoryById(item.category) : null;
+                          return (
+                            <div key={item.id} className="flex items-center gap-3 text-sm">
+                              <span className="w-6 text-center">
+                                {item.type === 'gift' ? '🎁' : item.type === 'transfer' ? '🏦' : cat?.icon}
+                              </span>
+                              <span className="flex-1 text-slate-300">
+                                {item.type === 'gift' ? item.donor : item.type === 'transfer' ? 'Cash → Bank' : item.description || cat?.en}
+                              </span>
+                              <span className={item.type === 'gift' ? 'text-green-400' : item.type === 'transfer' ? 'text-blue-400' : 'text-red-400'}>
+                                {item.type === 'gift' ? '+' : item.type === 'expense' ? '-' : ''}{fmt(item.amount)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="text-center py-12">
+                      <span className="text-4xl mb-4 block">📅</span>
+                      <p className="text-slate-400">No transactions yet</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Donors Tab */}
+              {tab === 'donors' && (
+                <div className="space-y-3">
+                  {donorRankings.length > 0 ? (
+                    <>
+                      <div className="bg-slate-900 rounded-xl p-4">
+                        <PieChart 
+                          data={donorRankings.slice(0, 8).map(([name, amount], i) => ({
+                            label: name,
+                            value: amount,
+                            color: ['#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1', '#8b5cf6'][i]
+                          }))}
+                          size={180}
+                          title="🎁 TOP DONORS"
+                        />
+                      </div>
+                      <div className="bg-slate-900 rounded-xl p-4">
+                        <p className="text-slate-400 text-sm font-medium mb-3">ALL DONORS ({donorRankings.length})</p>
+                        <div className="space-y-2 max-h-80 overflow-y-auto">
+                          {donorRankings.map(([donor, amount], i) => (
+                            <div key={donor} className="flex justify-between items-center py-2 border-b border-slate-800 last:border-0">
+                              <div className="flex items-center gap-3">
+                                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${i < 3 ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-500'}`}>
+                                  {i + 1}
+                                </span>
+                                <span className="text-white">{donor}</span>
+                              </div>
+                              <span className="text-green-400 font-medium">{fmt(amount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center py-12">
+                      <span className="text-4xl mb-4 block">🎁</span>
+                      <p className="text-slate-400">No koha recorded yet</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Reset Button */}
+              <button
+                onClick={() => {
+                  if (confirm('Delete ALL data?')) {
+                    if (confirm('Really?')) {
+                      setGifts([]); setExpenses([]); setTransfers([]);
+                      setSyncCode(null); setSyncBinId(null); setLastSync(null);
+                      setValidationResults({});
+                      setGiftValidationResults({});
+                      setScreen('home');
+                    }
+                  }
+                }}
+                className="w-full py-3 bg-red-900/30 border border-red-900/50 rounded-xl text-red-400 text-sm mt-6"
+              >
+                Tape Data Uma • Reset All
+              </button>
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Sync Screen
+      const SyncScreen = () => {
+        const [joinCode, setJoinCode] = useState('');
+        const [importCode, setImportCode] = useState('');
+        const [copied, setCopied] = useState(false);
+        const [error, setError] = useState('');
+        const [status, setStatus] = useState('');
+        const [creating, setCreating] = useState(false);
+        const [debugLog, setDebugLog] = useState('');
+        
+        const log = (msg) => {
+          const timestamp = new Date().toLocaleTimeString();
+          setDebugLog(prev => prev + '\n[' + timestamp + '] ' + msg);
+          console.log(msg);
+        };
+
+        const handleCreateSync = async () => {
+          setDebugLog('--- Starting Create Sync ---');
+          log('Step 1: Button clicked');
+          
+          setError('');
+          setStatus('🔄 Creating family sync...');
+          setCreating(true);
+          
+          try {
+            log('Step 2: Calling CloudSync.create...');
+            const result = await CloudSync.create({ gifts, expenses, transfers });
+            log('Step 3: CloudSync.create returned: ' + JSON.stringify(result));
+            
+            if (result && typeof result === 'string') {
+              // Success - result is the 5-letter code from the server
+              // Use it for BOTH syncCode and syncBinId
+              setSyncCode(result);
+              setSyncBinId(result);
+              setLastSync(Date.now());
+              setStatus('✅ Created!');
+              log('Step 4: SUCCESS! Code: ' + result);
+            } else if (result && result.error) {
+              setStatus('');
+              setError('API Error: ' + result.error);
+              log('Step 4: API ERROR: ' + JSON.stringify(result));
+            } else {
+              setStatus('');
+              setError('Cloud sync failed - unknown error');
+              log('Step 4: FAILED - unexpected result: ' + JSON.stringify(result));
+            }
+          } catch (e) {
+            log('ERROR: ' + (e.message || String(e)));
+            setStatus('');
+            setError('Error: ' + (e.message || String(e)));
+          }
+          setCreating(false);
+          log('--- Finished ---');
+        };
+
+        const copyFamilyCode = async () => {
+          // Just copy the 5-letter code
+          const success = await copyToClipboard(syncBinId);
+          if (success) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          } else {
+            alert('Copy failed. Code is: ' + syncBinId);
+          }
+        };
+
+        const handleJoinSync = async () => {
+          const code = joinCode.trim().toUpperCase();
+          if (code.length < 4 || code.length > 6) {
+            alert('Please enter the 5-letter family code');
+            return;
+          }
+          
+          // Try to fetch data with this code
+          setSyncing(true);
+          const data = await CloudSync.get(code);
+          setSyncing(false);
+          
+          if (data) {
+            setSyncCode(code);
+            setSyncBinId(code);
+            
+            // Merge the data
+            const mergeArrays = (local, cloud) => {
+              const map = new Map();
+              [...local, ...(cloud || [])].forEach(item => map.set(item.id, item));
+              return Array.from(map.values());
+            };
+            setGifts(mergeArrays(gifts, data.gifts || []));
+            setExpenses(mergeArrays(expenses, data.expenses || []));
+            setTransfers(mergeArrays(transfers, data.transfers || []));
+            setLastSync(Date.now());
+            
+            alert('✅ Connected! Data synced.');
+            setJoinCode('');
+          } else {
+            alert('Code not found. Check the code and try again.');
+          }
+        };
+
+        // Export all data as shareable code
+        const [exportedCode, setExportedCode] = useState('');
+        
+        const handleExport = async () => {
+          const data = {
+            gifts,
+            expenses,
+            transfers,
+            exportedAt: Date.now(),
+            version: 2
+          };
+          const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+          setExportedCode(encoded);
+          const success = await copyToClipboard(encoded);
+          if (success) {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          }
+        };
+
+        // Import data from exported code
+        const handleImport = () => {
+          try {
+            const decoded = JSON.parse(decodeURIComponent(escape(atob(importCode.trim()))));
+            if (decoded.gifts || decoded.expenses) {
+              const mergeArrays = (local, imported) => {
+                const map = new Map();
+                [...local, ...(imported || [])].forEach(item => map.set(item.id, item));
+                return Array.from(map.values());
+              };
+              setGifts(mergeArrays(gifts, decoded.gifts));
+              setExpenses(mergeArrays(expenses, decoded.expenses));
+              setTransfers(mergeArrays(transfers, decoded.transfers));
+              alert(`✅ Imported!\n${decoded.gifts?.length || 0} gifts\n${decoded.expenses?.length || 0} expenses\n${decoded.transfers?.length || 0} transfers`);
+              setImportCode('');
+            } else {
+              alert('Invalid backup code');
+            }
+          } catch (e) {
+            console.error('Import error:', e);
+            alert('Invalid code. Make sure you copied the whole backup code.');
+          }
+        };
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <button onClick={() => setScreen('home')} className="text-slate-500 text-sm mb-4">← Back</button>
+              <h1 className="text-2xl font-bold mb-2">Fa'atasi • Sync</h1>
+              <p className="text-slate-500 text-sm mb-6">Share with whānau</p>
+
+              {error && (
+                <div className="bg-red-900/30 border border-red-700/50 rounded-xl p-3 mb-4">
+                  <p className="text-red-300 text-sm">{error}</p>
+                </div>
+              )}
+              
+              {status && (
+                <div className="bg-cyan-900/30 border border-cyan-700/50 rounded-xl p-3 mb-4">
+                  <p className="text-cyan-300 text-sm">{status}</p>
+                </div>
+              )}
+
+              {/* Current Status */}
+              <div className={`rounded-xl p-4 mb-6 ${syncBinId ? 'bg-green-900/30 border border-green-700/50' : 'bg-slate-900'}`}>
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">{syncBinId ? '☁️' : '📴'}</span>
+                  <div className="flex-1">
+                    <p className="font-medium">{syncBinId ? 'Family Sync Active' : 'Not Connected'}</p>
+                    {syncBinId ? (
+                      <p className="text-green-400 text-xl font-bold tracking-widest">{syncBinId}</p>
+                    ) : (
+                      <p className="text-slate-500 text-sm">Create or join below</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {syncBinId ? (
+                <>
+                  {/* Connected State */}
+                  <button onClick={copyFamilyCode} className="w-full py-3 bg-cyan-600 rounded-xl font-medium mb-3">
+                    {copied ? '✓ Copied!' : '📋 Copy Family Code'}
+                  </button>
+                  <p className="text-slate-500 text-xs text-center mb-4">Share this code with whānau to connect their devices</p>
+                  
+                  <button onClick={syncFromCloud} disabled={syncing} className="w-full py-3 bg-slate-800 rounded-xl font-medium mb-3">
+                    {syncing ? '🔄 Syncing...' : '🔄 Sync Now'}
+                  </button>
+                  
+                  <button 
+                    onClick={() => { 
+                      if (confirm('Leave Family Sync?\n\nYour local data will stay on this device, but you will no longer receive updates from family members.\n\nNote: If you are the last member, the sync data will remain in the cloud until another device reconnects with this code.')) {
+                        setSyncCode(null); 
+                        setSyncBinId(null);
+                        setStatus('Disconnected from family sync');
+                        setTimeout(() => setStatus(''), 3000);
+                      }
+                    }} 
+                    className="w-full py-3 bg-red-900/30 rounded-xl text-red-400 text-sm"
+                  >
+                    🚪 Leave Family Sync
+                  </button>
+                </>
+              ) : (
+                <>
+                  {/* Create New Sync */}
+                  <div className="bg-slate-900 rounded-xl p-4 mb-4">
+                    <p className="text-white font-medium mb-2">☁️ Cloud Sync</p>
+                    <p className="text-slate-500 text-xs mb-3">Auto-syncs between devices</p>
+                    <button 
+                      onClick={handleCreateSync} 
+                      disabled={creating} 
+                      className="w-full py-3 bg-gradient-to-r from-cyan-600 to-teal-600 rounded-xl font-bold disabled:opacity-50 mb-3"
+                    >
+                      {creating ? '🔄 Creating...' : '+ Create Family Sync'}
+                    </button>
+                    
+                    <div className="border-t border-slate-800 pt-3 mt-3">
+                      <p className="text-slate-400 text-xs mb-2">Or join existing family:</p>
+                      <input 
+                        type="text" 
+                        value={joinCode} 
+                        onChange={(e) => setJoinCode(e.target.value.toUpperCase().slice(0, 5))} 
+                        placeholder="Enter 5-letter code" 
+                        className="w-full bg-slate-800 rounded-xl px-4 py-3 text-white mb-2 text-sm text-center tracking-widest font-bold uppercase"
+                        maxLength={5}
+                      />
+                      <button 
+                        onClick={handleJoinSync} 
+                        disabled={!joinCode.trim() || syncing} 
+                        className="w-full py-2 bg-slate-700 rounded-xl font-medium disabled:opacity-50"
+                      >
+                        {syncing ? '🔄 Connecting...' : 'Join Family'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Manual Backup Section */}
+              <div className="mt-6 pt-6 border-t border-slate-800">
+                <p className="text-white font-medium mb-3">📦 Manual Backup</p>
+                <p className="text-slate-500 text-xs mb-3">Export/import data as a code (works offline)</p>
+                
+                {/* Export */}
+                <button onClick={handleExport} className="w-full py-3 bg-purple-600 rounded-xl font-medium mb-2">
+                  {copied ? '✓ Copied!' : (gifts.length + expenses.length > 0) ? `📤 Export Data (${gifts.length} gifts, ${expenses.length} expenses)` : '📤 Export Data (no data yet)'}
+                </button>
+                
+                {exportedCode && (
+                  <div className="mb-4">
+                    <textarea 
+                      readOnly 
+                      value={exportedCode} 
+                      className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300 h-16 font-mono mb-1"
+                      onClick={(e) => e.target.select()}
+                    />
+                    <p className="text-slate-600 text-xs">Tap to select, then copy</p>
+                  </div>
+                )}
+                
+                {/* Import */}
+                <div className="mt-3">
+                  <input 
+                    type="text" 
+                    value={importCode} 
+                    onChange={(e) => setImportCode(e.target.value)} 
+                    placeholder="Paste backup code to import" 
+                    className="w-full bg-slate-800 rounded-xl px-4 py-3 text-white mb-2 text-sm" 
+                  />
+                  <button 
+                    onClick={handleImport} 
+                    disabled={!importCode.trim()} 
+                    className="w-full py-2 bg-slate-700 rounded-xl font-medium disabled:opacity-50"
+                  >
+                    📥 Import Backup
+                  </button>
+                </div>
+              </div>
+
+              {/* Debug Log */}
+              {debugLog && (
+                <div className="mt-6 pt-6 border-t border-slate-800">
+                  <p className="text-slate-400 text-sm font-medium mb-2">📋 Debug Log (copy this if there's a problem)</p>
+                  <textarea 
+                    readOnly 
+                    value={debugLog}
+                    className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-32"
+                    onClick={(e) => e.target.select()}
+                  />
+                  <button 
+                    onClick={async () => { 
+                      const success = await copyToClipboard(debugLog);
+                      alert(success ? 'Debug log copied!' : 'Copy failed. Please select and copy manually.');
+                    }}
+                    className="w-full py-2 bg-slate-700 rounded-lg text-sm mt-2"
+                  >
+                    📋 Copy Log
+                  </button>
+                </div>
+              )}
+
+              {lastSync && (
+                <p className="text-slate-600 text-xs text-center mt-6">
+                  Last sync: {new Date(lastSync).toLocaleString()}
+                </p>
+              )}
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Add Transfer Screen
+      const AddTransfer = () => {
+        const [amount, setAmount] = useState('');
+        const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+        const [note, setNote] = useState('');
+
+        const handleSubmit = () => {
+          if (!amount || parseFloat(amount) <= 0 || parseFloat(amount) > totals.balanceCash) return;
+          addTransfer({ amount: parseFloat(amount), date, note: note.trim() });
+          setScreen('home');
+        };
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <button onClick={() => setScreen('home')} className="text-slate-500 text-sm mb-4">← Back</button>
+              <h1 className="text-2xl font-bold mb-6">💵 → 🏦 Deposit Cash</h1>
+              <div className="bg-slate-900 rounded-xl p-4 mb-6">
+                <p className="text-slate-400 text-sm">Cash Available</p>
+                <p className="text-2xl font-bold text-green-400">{fmt(totals.balanceCash)}</p>
+              </div>
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Amount</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">$</span>
+                  <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="w-full bg-slate-900 rounded-xl px-4 py-4 pl-10 text-2xl font-bold text-white placeholder-slate-600 outline-none" />
+                </div>
+                <button onClick={() => setAmount(totals.balanceCash.toString())} className="mt-2 text-cyan-400 text-sm">All ({fmt(totals.balanceCash)})</button>
+              </div>
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Date</label>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white" />
+              </div>
+              <div className="mb-6">
+                <label className="text-slate-400 text-sm mb-2 block">Note</label>
+                <input type="text" value={note} onChange={(e) => setNote(e.target.value)} placeholder="(optional)" className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white placeholder-slate-600" />
+              </div>
+              <button onClick={handleSubmit} disabled={!amount || parseFloat(amount) <= 0 || parseFloat(amount) > totals.balanceCash} className="w-full py-4 bg-gradient-to-r from-blue-600 to-cyan-600 rounded-xl font-bold text-lg disabled:opacity-50">Deposit</button>
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Add Gift Screen
+      const AddGift = ({ editing = false }) => {
+        const [amount, setAmount] = useState(editing && editingItem ? editingItem.amount.toString() : '');
+        const [donor, setDonor] = useState(editing && editingItem ? editingItem.donor : '');
+        const [category, setCategory] = useState(editing && editingItem ? editingItem.category || '' : '');
+        const [method, setMethod] = useState(editing && editingItem ? editingItem.method : 'cash');
+        const [note, setNote] = useState(editing && editingItem ? editingItem.note || '' : '');
+        const [date, setDate] = useState(editing && editingItem ? editingItem.date : new Date().toISOString().split('T')[0]);
+        const [showSuggestions, setShowSuggestions] = useState(false);
+        const [showCategories, setShowCategories] = useState(false);
+        const [confirmDelete, setConfirmDelete] = useState(false);
+        const [aiSuggestion, setAiSuggestion] = useState(null);
+
+        const filteredDonors = useMemo(() => {
+          if (!donor.trim()) return [];
+          return donors.filter(d => d.toLowerCase().includes(donor.toLowerCase()) && d.toLowerCase() !== donor.toLowerCase());
+        }, [donor, donors]);
+
+        // AI suggestion when donor changes
+        useEffect(() => {
+          if (donor.trim().length > 2) {
+            const suggestion = AIValidator.suggestGiftCategory(donor, gifts);
+            setAiSuggestion(suggestion);
+            // Auto-set category if not already set and we have a good suggestion
+            if (suggestion && !category && suggestion.confidence >= 75) {
+              setCategory(suggestion.categoryId);
+            }
+          } else {
+            setAiSuggestion(null);
+          }
+        }, [donor, gifts]);
+
+        const handleSubmit = () => {
+          if (!amount || !donor.trim()) return;
+          const giftData = { 
+            amount: parseFloat(amount), 
+            donor: donor.trim(), 
+            category: category || 'isi', // Default to "Other" if not set
+            method, 
+            note: note.trim(), 
+            date 
+          };
+          if (editing && editingItem) updateGift(editingItem.id, giftData);
+          else addGift(giftData);
+          setScreen('gifts');
+          setEditingItem(null);
+        };
+
+        const handleDelete = () => {
+          if (confirmDelete) { deleteGift(editingItem.id); setScreen('gifts'); setEditingItem(null); }
+          else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000); }
+        };
+
+        const selectedCat = category ? getGiftCategoryById(category) : null;
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <button onClick={() => { setScreen(editing ? 'gifts' : 'home'); setEditingItem(null); }} className="text-slate-500 text-sm mb-4">← Back</button>
+              <h1 className="text-2xl font-bold mb-6">{editing ? "Edit" : "Add Gift"}</h1>
+              
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Amount</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">$</span>
+                  <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="w-full bg-slate-900 rounded-xl px-4 py-4 pl-10 text-2xl font-bold text-white placeholder-slate-600 outline-none" />
+                </div>
+              </div>
+              
+              <div className="mb-4 relative">
+                <label className="text-slate-400 text-sm mb-2 block">From</label>
+                <input type="text" value={donor} onChange={(e) => { setDonor(e.target.value); setShowSuggestions(true); }} onFocus={() => setShowSuggestions(true)} onBlur={() => setTimeout(() => setShowSuggestions(false), 200)} placeholder="Name" className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white placeholder-slate-600 outline-none" />
+                {showSuggestions && filteredDonors.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-slate-800 rounded-xl overflow-hidden z-10 border border-slate-700">
+                    {filteredDonors.slice(0, 5).map(d => (
+                      <button key={d} onClick={() => { setDonor(d); setShowSuggestions(false); }} className="w-full px-4 py-3 text-left text-white hover:bg-slate-700">{d}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* AI Suggestion hint */}
+              {aiSuggestion && !category && (
+                <div className="mb-4 bg-cyan-900/30 border border-cyan-700/50 rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2">
+                      <span>🤖</span>
+                      <span className="text-cyan-200 text-sm">Looks like {aiSuggestion.category.en}?</span>
+                    </div>
+                    <button 
+                      onClick={() => setCategory(aiSuggestion.categoryId)}
+                      className="px-3 py-1 bg-cyan-600 rounded-lg text-sm font-medium"
+                    >
+                      {aiSuggestion.category.icon} Yes
+                    </button>
+                  </div>
+                  {aiSuggestion.reason && (
+                    <p className="text-cyan-400/60 text-xs">{aiSuggestion.reason}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Category Selection */}
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Category</label>
+                <button onClick={() => setShowCategories(true)} className="w-full bg-slate-900 rounded-xl px-4 py-3 text-left flex items-center gap-3">
+                  {selectedCat ? (
+                    <>
+                      <span className="text-xl">{selectedCat.icon}</span>
+                      <span className="text-white">{getCategoryName(selectedCat)}</span>
+                    </>
+                  ) : (
+                    <span className="text-slate-600">Select category (optional)</span>
+                  )}
+                </button>
+              </div>
+
+              {/* Category Picker Modal */}
+              {showCategories && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setShowCategories(false)}>
+                  <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm fade-in" />
+                  <div 
+                    className="relative bg-slate-900 w-full max-w-sm rounded-2xl p-5 border border-slate-700 shadow-2xl slide-in"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex justify-between items-center mb-4">
+                      <h2 className="text-lg font-bold text-white">Select Category</h2>
+                      <button onClick={() => setShowCategories(false)} className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400">×</button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {GIFT_CATEGORIES.map(cat => (
+                        <button 
+                          key={cat.id} 
+                          onClick={() => { setCategory(cat.id); setShowCategories(false); }} 
+                          className={`p-4 rounded-xl flex flex-col items-center gap-2 ${category === cat.id ? 'ring-2 ring-cyan-400' : ''}`}
+                          style={{ backgroundColor: cat.color + '20' }}
+                        >
+                          <span className="text-2xl">{cat.icon}</span>
+                          <span className="text-xs text-white text-center">{getCategoryName(cat)}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {category && (
+                      <button 
+                        onClick={() => { setCategory(''); setShowCategories(false); }}
+                        className="w-full mt-4 py-2 bg-slate-800 rounded-xl text-slate-400 text-sm"
+                      >
+                        Clear selection
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Method</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => setMethod('cash')} className={`py-3 rounded-xl font-medium ${method === 'cash' ? 'bg-green-600 text-white' : 'bg-slate-900 text-slate-400'}`}>💵 Cash</button>
+                  <button onClick={() => setMethod('bank')} className={`py-3 rounded-xl font-medium ${method === 'bank' ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400'}`}>🏦 Bank</button>
+                </div>
+              </div>
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Date</label>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white" />
+              </div>
+              <div className="mb-6">
+                <label className="text-slate-400 text-sm mb-2 block">Note</label>
+                <input type="text" value={note} onChange={(e) => setNote(e.target.value)} placeholder="(optional)" className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white placeholder-slate-600" />
+              </div>
+              <button onClick={handleSubmit} disabled={!amount || !donor.trim()} className="w-full py-4 bg-gradient-to-r from-green-600 to-emerald-600 rounded-xl font-bold text-lg disabled:opacity-50">{editing ? "Save" : "Add"}</button>
+              {editing && (
+                <button onClick={handleDelete} className={`w-full py-3 mt-3 rounded-xl font-medium ${confirmDelete ? 'bg-red-600 text-white' : 'bg-slate-900 text-red-400'}`}>
+                  {confirmDelete ? 'Tap again to confirm' : 'Delete'}
+                </button>
+              )}
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Add Expense Screen
+      const AddExpense = ({ editing = false }) => {
+        const [amount, setAmount] = useState(editing && editingItem ? editingItem.amount.toString() : '');
+        const [category, setCategory] = useState(editing && editingItem ? editingItem.category : '');
+        const [description, setDescription] = useState(editing && editingItem ? editingItem.description || '' : '');
+        const [method, setMethod] = useState(editing && editingItem ? editingItem.method : 'cash');
+        const [date, setDate] = useState(editing && editingItem ? editingItem.date : new Date().toISOString().split('T')[0]);
+        const [showCategories, setShowCategories] = useState(false);
+        const [confirmDelete, setConfirmDelete] = useState(false);
+        const [scanningLocal, setScanningLocal] = useState(false);
+        const [scanProgress, setScanProgress] = useState(0);
+        const [lastScanInfo, setLastScanInfo] = useState(null);
+        const [pendingReceipt, setPendingReceipt] = useState(null);
+        const [showReceipt, setShowReceipt] = useState(false);
+        const [photoTaken, setPhotoTaken] = useState(editing ? true : false);
+        const [scanStatus, setScanStatus] = useState('');
+        const [debugLog, setDebugLog] = useState(() => localStorage.getItem('scan_debug_log') || '');
+        const [showDebugLog, setShowDebugLog] = useState(false);
+        const [showReceiptDetails, setShowReceiptDetails] = useState(false);
+        
+        // Receipt detail fields (optional, AI-filled)
+        const [subtotal, setSubtotal] = useState(editing && editingItem?.subtotal ? editingItem.subtotal.toString() : '');
+        const [gst, setGst] = useState(editing && editingItem?.gst ? editingItem.gst.toString() : '');
+        const [discount, setDiscount] = useState(editing && editingItem?.discount ? editingItem.discount.toString() : '');
+        const [cashOut, setCashOut] = useState(editing && editingItem?.cashOut ? editingItem.cashOut.toString() : '');
+        const [change, setChange] = useState(editing && editingItem?.change ? editingItem.change.toString() : '');
+        const [paymentMethod, setPaymentMethod] = useState(editing && editingItem?.paymentMethod || '');
+        const [cardLastFour, setCardLastFour] = useState(editing && editingItem?.cardLastFour || '');
+        
+        const fileInputRef = useRef(null);
+        const canvasRef = useRef(null);
+        
+        // Debug logger - persists to localStorage
+        const log = (msg) => {
+          const timestamp = new Date().toLocaleTimeString();
+          const entry = '[' + timestamp + '] ' + msg;
+          console.log('[SCAN] ' + msg);
+          setDebugLog(prev => {
+            const newLog = prev + '\n' + entry;
+            localStorage.setItem('scan_debug_log', newLog);
+            return newLog;
+          });
+        };
+        
+        // Clear log helper
+        const clearLog = () => {
+          localStorage.removeItem('scan_debug_log');
+          setDebugLog('');
+        };
+        
+        // Log on mount and check for pending scan to recover
+        useEffect(() => {
+          log('AddExpense mounted, editing=' + editing + ', photoTaken=' + photoTaken);
+          
+          // DEBUG: Check what's in storage
+          const hasResult = localStorage.getItem('pending_scan_result') || sessionStorage.getItem('pending_scan_result');
+          const hasImage = localStorage.getItem('pending_scan_image') || sessionStorage.getItem('pending_scan_image');
+          log('storage check: hasResult=' + (hasResult ? 'YES(' + hasResult.length + ' chars)' : 'NO') + ', hasImage=' + (hasImage ? 'YES' : 'NO'));
+          
+          // Check if we have a completed scan result to recover (try both storages)
+          if (hasResult && !editing) {
+            try {
+              const result = JSON.parse(hasResult);
+              const age = Date.now() - (result.savedAt || 0);
+              log('Found pending scan RESULT from ' + Math.round(age/1000) + 's ago');
+              
+              if (age < 300000) { // 5 minutes
+                log('Recovering scan result: total=' + result.total + ', vendor=' + result.vendor);
+                
+                // Fill form directly
+                if (result.total) setAmount(result.total.toString());
+                if (result.vendor) setDescription(result.vendor);
+                if (result.category) setCategory(result.category);
+                if (result.date) setDate(result.date);
+                
+                // Recover receipt details
+                if (result.subtotal) setSubtotal(result.subtotal.toString());
+                if (result.gst) setGst(result.gst.toString());
+                if (result.discount) setDiscount(result.discount.toString());
+                if (result.cashOut) setCashOut(result.cashOut.toString());
+                if (result.change) setChange(result.change.toString());
+                if (result.paymentMethod) {
+                  setPaymentMethod(result.paymentMethod);
+                  // Also set payment method
+                  if (result.paymentMethod === 'Cash') {
+                    setMethod('cash');
+                  } else {
+                    setMethod('bank');
+                  }
+                }
+                if (result.cardLastFour) setCardLastFour(result.cardLastFour);
+                
+                // Show receipt details if any were recovered
+                if (result.subtotal || result.gst || result.discount || result.paymentMethod) {
+                  setShowReceiptDetails(true);
+                }
+                
+                setPendingReceipt({
+                  originalImage: result.originalImage,
+                  vendor: result.vendor,
+                  total: result.total,
+                  items: result.items,
+                  rawText: result.rawText,
+                  subtotal: result.subtotal,
+                  gst: result.gst,
+                  discount: result.discount,
+                  cashOut: result.cashOut,
+                  change: result.change,
+                  paymentMethod: result.paymentMethod,
+                  cardLastFour: result.cardLastFour
+                });
+                setPhotoTaken(true);
+                setLastScanInfo({ vendor: result.vendor, total: result.total, success: true, message: 'Recovered! Review and save.' });
+                
+                // Clear it so we don't recover again
+                localStorage.removeItem('pending_scan_result');
+                localStorage.removeItem('pending_scan_image');
+                localStorage.removeItem('pending_scan_time');
+                sessionStorage.removeItem('pending_scan_result');
+                sessionStorage.removeItem('pending_scan_image');
+                sessionStorage.removeItem('pending_scan_time');
+                log('Result recovered and form filled!');
+                return;
+              } else {
+                log('Result too old (' + Math.round(age/1000) + 's), clearing');
+              }
+            } catch (e) {
+              log('Error parsing scan result: ' + e.message);
+            }
+            localStorage.removeItem('pending_scan_result');
+          }
+          
+          // Check if we have a pending image (no result yet)
+          const pendingImage = localStorage.getItem('pending_scan_image') || sessionStorage.getItem('pending_scan_image');
+          const pendingTime = localStorage.getItem('pending_scan_time') || sessionStorage.getItem('pending_scan_time');
+          
+          if (pendingImage && pendingTime && !editing && !photoTaken) {
+            const age = Date.now() - parseInt(pendingTime);
+            log('Found pending scan IMAGE from ' + Math.round(age/1000) + 's ago');
+            
+            // Only recover if less than 5 minutes old
+            if (age < 300000) {
+              log('Recovering image from localStorage');
+              setPendingReceipt({
+                originalImage: pendingImage,
+                scannedAt: new Date(parseInt(pendingTime)).toISOString(),
+                vendor: '',
+                total: 0
+              });
+              setPhotoTaken(true);
+              setLastScanInfo({ success: true, message: 'Photo recovered! Tap "Autofill with AI" or enter details manually.' });
+              
+              // Re-check for result after 2 seconds (in case a scan was completing during reload)
+              setTimeout(() => {
+                const delayedResult = localStorage.getItem('pending_scan_result');
+                if (delayedResult) {
+                  log('Delayed check: Found result that completed during reload!');
+                  try {
+                    const result = JSON.parse(delayedResult);
+                    if (result.total) setAmount(result.total.toString());
+                    if (result.vendor) setDescription(result.vendor);
+                    if (result.category) setCategory(result.category);
+                    if (result.date) setDate(result.date);
+                    setPendingReceipt(prev => ({
+                      ...prev,
+                      vendor: result.vendor,
+                      total: result.total,
+                      items: result.items,
+                      rawText: result.rawText
+                    }));
+                    setLastScanInfo({ vendor: result.vendor, total: result.total, success: true, message: 'Auto-filled from scan!' });
+                    localStorage.removeItem('pending_scan_result');
+                    localStorage.removeItem('pending_scan_image');
+                    localStorage.removeItem('pending_scan_time');
+                    log('Delayed recovery complete: total=' + result.total);
+                  } catch (e) {
+                    log('Delayed parse error: ' + e.message);
+                  }
+                } else {
+                  log('Delayed check: No result found');
+                }
+              }, 2000);
+            } else {
+              log('Pending scan too old, clearing');
+              localStorage.removeItem('pending_scan_image');
+              localStorage.removeItem('pending_scan_time');
+            }
+          }
+        }, []);
+        
+        // Manual AI scan function
+        const runAIScan = async () => {
+          log('--- AI SCAN STARTED ---');
+          
+          if (!pendingReceipt?.originalImage) {
+            log('ERROR: No image to scan');
+            return;
+          }
+          
+          log('Image size: ' + Math.round(pendingReceipt.originalImage.length / 1024) + 'KB');
+          setScanningLocal(true);
+          setScanProgress(0);
+          setScanStatus('Initializing...');
+          
+          try {
+            log('Calling scanReceipt...');
+            const result = await scanReceipt(pendingReceipt.originalImage, (progress) => {
+              setScanProgress(progress);
+              if (progress < 30) {
+                setScanStatus('Reading text...');
+              } else if (progress < 70) {
+                setScanStatus('Processing...');
+              } else {
+                setScanStatus('Analyzing...');
+              }
+            });
+            log('scanReceipt returned: ' + JSON.stringify(result).substring(0, 500));
+            
+            setScanProgress(100);
+            setScanStatus('Complete!');
+            
+            // scanReceipt already saves to localStorage, so if we get here without reload,
+            // we can proceed to fill the form and then clear localStorage
+            
+            if (result && result.total) {
+              log('SUCCESS: total=' + result.total + ', vendor=' + result.vendor + ', category=' + result.category);
+              setAmount(result.total.toString());
+              if (result.date) {
+                log('Setting date: ' + result.date);
+                setDate(result.date);
+              }
+              if (result.category) {
+                log('Setting category: ' + result.category);
+                setCategory(result.category);
+              }
+              if (result.vendor) {
+                log('Setting description: ' + result.vendor);
+                setDescription(result.vendor);
+              }
+              
+              // Set receipt details if available
+              if (result.subtotal) {
+                log('Setting subtotal: ' + result.subtotal);
+                setSubtotal(result.subtotal.toString());
+              }
+              if (result.gst) {
+                log('Setting GST: ' + result.gst);
+                setGst(result.gst.toString());
+              }
+              if (result.discount) {
+                log('Setting discount: ' + result.discount);
+                setDiscount(result.discount.toString());
+              }
+              if (result.cashOut) {
+                log('Setting cashOut: ' + result.cashOut);
+                setCashOut(result.cashOut.toString());
+              }
+              if (result.change) {
+                log('Setting change: ' + result.change);
+                setChange(result.change.toString());
+              }
+              if (result.paymentMethod) {
+                log('Setting paymentMethod: ' + result.paymentMethod);
+                setPaymentMethod(result.paymentMethod);
+                // Also set the expense method based on payment method
+                if (['Cash'].includes(result.paymentMethod)) {
+                  setMethod('cash');
+                } else if (['Visa', 'Mastercard', 'EFTPOS', 'Debit Card', 'Credit Card', 'Paywave', 'Contactless'].includes(result.paymentMethod)) {
+                  setMethod('bank');
+                }
+              }
+              if (result.cardLastFour) {
+                log('Setting cardLastFour: ' + result.cardLastFour);
+                setCardLastFour(result.cardLastFour);
+              }
+              
+              // Show receipt details section if we have any details
+              if (result.subtotal || result.gst || result.discount || result.paymentMethod) {
+                setShowReceiptDetails(true);
+              }
+              
+              setPendingReceipt(prev => ({
+                ...prev,
+                vendor: result.vendor,
+                items: result.items,
+                total: result.total,
+                date: result.date,
+                time: result.time,
+                rawText: result.rawText,
+                subtotal: result.subtotal,
+                gst: result.gst,
+                discount: result.discount,
+                cashOut: result.cashOut,
+                change: result.change,
+                paymentMethod: result.paymentMethod,
+                cardLastFour: result.cardLastFour
+              }));
+              
+              setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
+              
+              // Clear localStorage on success
+              localStorage.removeItem('pending_scan_image');
+              localStorage.removeItem('pending_scan_time');
+              localStorage.removeItem('pending_scan_result');
+              log('Cleared localStorage, form should be filled');
+            } else {
+              log('WARN: No total in result. Full result: ' + JSON.stringify(result));
+              setLastScanInfo({ error: true, message: 'Could not read receipt. Enter details manually.' });
+              localStorage.removeItem('pending_scan_result');
+            }
+          } catch (err) {
+            log('ERROR in runAIScan: ' + err.message);
+            log('Error stack: ' + err.stack);
+            setLastScanInfo({ error: true, message: 'AI error: ' + err.message });
+            localStorage.removeItem('pending_scan_result');
+          }
+          
+          setScanningLocal(false);
+          setScanStatus('');
+          // Reset progress after a short delay so user sees 100%
+          setTimeout(() => setScanProgress(0), 1000);
+          log('--- AI SCAN FINISHED ---');
+          setTimeout(() => setLastScanInfo(null), 8000);
+        };
+        
+        // Get receipt (from pending scan or existing expense)
+        const currentReceipt = pendingReceipt || (editing && editingItem?.receipt) || null;
+
+        // Compress image to reduce storage size
+        const compressImage = (base64, maxWidth = 1200, quality = 0.7) => {
+          return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              let width = img.width;
+              let height = img.height;
+              
+              if (width > maxWidth) {
+                height = (height * maxWidth) / width;
+                width = maxWidth;
+              }
+              
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, width, height);
+              
+              // Get compressed base64 without the data URL prefix
+              const compressed = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+              resolve(compressed);
+            };
+            img.src = `data:image/jpeg;base64,${base64}`;
+          });
+        };
+
+        // Cleanup on unmount
+        useEffect(() => {
+          return () => {};
+        }, []);
+
+        // Receipt Viewer Component
+        const ReceiptViewer = ({ receipt, onClose }) => {
+          const [viewOriginal, setViewOriginal] = useState(false);
+          
+          if (!receipt) return null;
+          
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+              <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm fade-in" />
+              <div 
+                className="relative bg-slate-900 w-full max-w-md rounded-2xl max-h-[85vh] overflow-auto border border-slate-700 shadow-2xl slide-in"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Header */}
+                <div className="sticky top-0 bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center z-10">
+                  <h2 className="text-lg font-bold text-white">🧾 Receipt</h2>
+                  <div className="flex gap-2">
+                    {receipt.originalImage && (
+                      <button 
+                        onClick={() => setViewOriginal(!viewOriginal)}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium ${viewOriginal ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                      >
+                        {viewOriginal ? '📝 Text' : '📷 Photo'}
+                      </button>
+                    )}
+                    <button onClick={onClose} className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400">×</button>
+                  </div>
+                </div>
+
+                {viewOriginal && receipt.originalImage ? (
+                  /* Original Image View */
+                  <div className="p-4">
+                    <img 
+                      src={`data:image/jpeg;base64,${receipt.originalImage}`} 
+                      alt="Receipt" 
+                      className="w-full rounded-xl"
+                    />
+                  </div>
+                ) : (
+                  /* Clean Text View */
+                  <div className="p-4">
+                    {/* Store Header */}
+                    <div className="text-center mb-4 pb-4 border-b border-slate-800">
+                      <p className="text-xl font-bold text-white">{receipt.vendor || 'Unknown Store'}</p>
+                      {receipt.address && <p className="text-slate-500 text-sm mt-1">{receipt.address}</p>}
+                      {(receipt.date || receipt.time) && (
+                        <p className="text-slate-400 text-sm mt-2">
+                          {receipt.date && fmtDateFull(receipt.date)}
+                          {receipt.time && ` at ${receipt.time}`}
+                        </p>
+                      )}
+                      {receipt.receiptNumber && (
+                        <p className="text-slate-600 text-xs mt-1">#{receipt.receiptNumber}</p>
+                      )}
+                    </div>
+
+                    {/* Items */}
+                    {Array.isArray(receipt.items) && receipt.items.length > 0 && (
+                      <div className="mb-4">
+                        <p className="text-slate-500 text-xs font-medium mb-2">ITEMS</p>
+                        <div className="space-y-2">
+                          {receipt.items.map((item, i) => (
+                            <div key={i} className="flex justify-between text-sm">
+                              <div className="flex-1">
+                                <span className="text-white">{item.name}</span>
+                                {item.qty > 1 && <span className="text-slate-500 ml-2">×{item.qty}</span>}
+                              </div>
+                              {item.price && <span className="text-slate-300">{fmt(item.price)}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Totals */}
+                    <div className="border-t border-slate-800 pt-4 space-y-2">
+                      {receipt.subtotal && (
+                        <div className="flex justify-between text-sm">
+                          <span className="text-slate-400">Subtotal</span>
+                          <span className="text-slate-300">{fmt(receipt.subtotal)}</span>
+                        </div>
+                      )}
+                      {receipt.gst && (
+                        <div className="flex justify-between text-sm">
+                          <span className="text-slate-400">GST (15%)</span>
+                          <span className="text-slate-300">{fmt(receipt.gst)}</span>
+                        </div>
+                      )}
+                      {receipt.total && (
+                        <div className="flex justify-between text-lg font-bold pt-2 border-t border-slate-700">
+                          <span className="text-white">TOTAL</span>
+                          <span className="text-white">{fmt(receipt.total)}</span>
+                        </div>
+                      )}
+                      {receipt.paymentMethod && (
+                        <div className="flex justify-between text-sm pt-2">
+                          <span className="text-slate-500">Paid by</span>
+                          <span className="text-slate-400">{receipt.paymentMethod}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Scanned info */}
+                    {receipt.scannedAt && (
+                      <div className="mt-4 pt-4 border-t border-slate-800">
+                        <p className="text-slate-600 text-xs text-center">
+                          Scanned {new Date(receipt.scannedAt).toLocaleString()}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        };
+
+        const handleScan = async (e) => {
+          log('--- SCAN STARTED ---');
+          
+          try {
+            const file = e.target.files?.[0];
+            if (!file) {
+              log('ERROR: No file');
+              return;
+            }
+            
+            log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB)');
+            
+            // Use FileReader but save immediately when we get the result
+            const reader = new FileReader();
+            
+            reader.onload = () => {
+              log('FileReader onload');
+              const base64 = reader.result.split(',')[1];
+              log('Got base64: ' + Math.round(base64.length/1024) + 'KB');
+              
+              // Compress large images before saving
+              if (base64.length > 1000000) { // > 1MB
+                log('Compressing large image...');
+                compressImage(base64, 1200, 0.7).then(compressed => {
+                  log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
+                  saveAndShowForm(compressed);
+                }).catch(err => {
+                  log('Compression failed, using original: ' + err.message);
+                  saveAndShowForm(base64);
+                });
+              } else {
+                saveAndShowForm(base64);
+              }
+            };
+            
+            const saveAndShowForm = (imageData) => {
+              // Save to BOTH localStorage and sessionStorage for redundancy
+              try {
+                localStorage.setItem('pending_scan_image', imageData);
+                localStorage.setItem('pending_scan_time', Date.now().toString());
+                sessionStorage.setItem('pending_scan_image', imageData);
+                sessionStorage.setItem('pending_scan_time', Date.now().toString());
+                log('Saved to localStorage and sessionStorage');
+              } catch (err) {
+                log('storage error: ' + err.message);
+              }
+              
+              // Update state synchronously
+              setPhotoTaken(true);
+              setPendingReceipt({
+                originalImage: imageData,
+                scannedAt: new Date().toISOString(),
+                vendor: '',
+                total: 0
+              });
+              log('State updated, showing form');
+            };
+            
+            reader.onerror = () => {
+              log('FileReader error');
+            };
+            
+            reader.readAsDataURL(file);
+            
+          } catch (error) {
+            log('ERROR: ' + error.message);
+          }
+        };
+
+        const handleSubmit = () => {
+          if (!amount || !category) return;
+          const expenseData = { 
+            amount: parseFloat(amount), 
+            category, 
+            description: description.trim(), 
+            method, 
+            date,
+            receipt: pendingReceipt || (editing && editingItem?.receipt) || null,
+            // Optional receipt details (only included if filled)
+            ...(subtotal && { subtotal: parseFloat(subtotal) }),
+            ...(gst && { gst: parseFloat(gst) }),
+            ...(discount && { discount: parseFloat(discount) }),
+            ...(cashOut && { cashOut: parseFloat(cashOut) }),
+            ...(change && { change: parseFloat(change) }),
+            ...(paymentMethod && { paymentMethod }),
+            ...(cardLastFour && { cardLastFour })
+          };
+          if (editing && editingItem) updateExpense(editingItem.id, expenseData);
+          else addExpense(expenseData);
+          setScreen('expenses');
+          setEditingItem(null);
+        };
+
+        const handleDelete = () => {
+          if (confirmDelete) { deleteExpense(editingItem.id); setScreen('expenses'); setEditingItem(null); }
+          else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000); }
+        };
+
+        const groupedCategories = useMemo(() => ({
+          tangihanga: EXPENSE_CATEGORIES.filter(c => c.group === 'tangihanga'),
+          kai: EXPENSE_CATEGORIES.filter(c => c.group === 'kai'),
+          travel: EXPENSE_CATEGORIES.filter(c => c.group === 'travel'),
+          utilities: EXPENSE_CATEGORIES.filter(c => c.group === 'utilities'),
+          other: EXPENSE_CATEGORIES.filter(c => c.group === 'other')
+        }), []);
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <button onClick={() => { setScreen(editing ? 'expenses' : 'home'); setEditingItem(null); }} className="text-slate-500 text-sm mb-4">← Back</button>
+              
+              {/* Show photo prompt for new expenses without photo */}
+              {!editing && !photoTaken ? (
+                <div className="min-h-[70vh] flex flex-col items-center justify-center px-6">
+                  {/* Single file input - iOS will show picker menu */}
+                  <input 
+                    ref={fileInputRef} 
+                    type="file" 
+                    accept="image/*"
+                    onChange={handleScan} 
+                    className="hidden" 
+                    key="camera-input"
+                  />
+                  
+                  {scanningLocal ? (
+                    /* Processing state - shows while reading */
+                    <div className="text-center w-full max-w-sm">
+                      <div className="w-24 h-24 mx-auto mb-6 rounded-2xl bg-cyan-500/20 flex items-center justify-center">
+                        <span className="text-5xl">✨</span>
+                      </div>
+                      <h2 className="text-2xl font-bold text-white mb-2">Reading Receipt</h2>
+                      <p className="text-cyan-400 text-lg mb-4">{scanStatus || 'Initializing...'}</p>
+                      
+                      {/* Progress bar */}
+                      <div className="relative w-full h-3 bg-slate-800 rounded-full overflow-hidden mb-2">
+                        <div 
+                          className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all duration-300 ease-out"
+                          style={{width: `${scanProgress}%`}}
+                        />
+                      </div>
+                      <p className="text-slate-500 text-sm">{scanProgress}% complete</p>
+                    </div>
+                  ) : (
+                    /* Initial choice - camera or gallery */
+                    <>
+                      <div className="w-24 h-24 mb-6 rounded-2xl bg-purple-500/20 flex items-center justify-center">
+                        <span className="text-5xl">🧾</span>
+                      </div>
+                      <h1 className="text-2xl font-bold text-white mb-2">Add Receipt</h1>
+                      <p className="text-slate-400 text-center mb-8">
+                        Snap a photo and AI will read it
+                      </p>
+                      
+                      <div className="w-full max-w-xs space-y-3">
+                        <button 
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); log('Add Photo clicked'); fileInputRef.current?.click(); }}
+                          className="w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl text-lg font-bold flex items-center justify-center gap-3"
+                        >
+                          📷 Add Photo
+                        </button>
+                        
+                        <p className="text-slate-500 text-xs text-center">
+                          You'll be able to take a new photo or choose from your library
+                        </p>
+                      </div>
+                      
+                      {/* Floating Debug Button */}
+                      <button 
+                        onClick={(e) => { 
+                          e.preventDefault(); 
+                          // Refresh log from localStorage
+                          setDebugLog(localStorage.getItem('scan_debug_log') || '');
+                          setShowDebugLog(true); 
+                        }}
+                        className="fixed bottom-24 right-4 w-12 h-12 bg-slate-800 rounded-full flex items-center justify-center text-xl border border-slate-700 z-50"
+                      >
+                        🐛
+                      </button>
+                      
+                      {/* Debug Log Modal */}
+                      {showDebugLog && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setShowDebugLog(false)}>
+                          <div className="absolute inset-0 bg-slate-950/90" />
+                          <div className="relative bg-slate-900 w-full max-w-md rounded-2xl p-4 border border-slate-700" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex justify-between items-center mb-3">
+                              <h3 className="text-white font-bold">🐛 Debug Log</h3>
+                              <button onClick={() => setShowDebugLog(false)} className="text-slate-400 text-xl">×</button>
+                            </div>
+                            <textarea 
+                              readOnly 
+                              value={debugLog || '(empty - no events logged yet)'}
+                              className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-48"
+                              onClick={(e) => e.target.select()}
+                            />
+                            <div className="flex gap-2 mt-3">
+                              <button 
+                                onClick={async (e) => { 
+                                  e.preventDefault(); 
+                                  const success = await copyToClipboard(debugLog);
+                                  if (success) {
+                                    e.target.textContent = '✓ Copied!';
+                                    setTimeout(() => { e.target.textContent = '📋 Copy'; }, 2000);
+                                  } else {
+                                    alert('Copy failed. Please select text and copy manually.');
+                                  }
+                                }}
+                                className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium"
+                              >
+                                📋 Copy
+                              </button>
+                              <button 
+                                onClick={(e) => { e.preventDefault(); clearLog(); }}
+                                className="flex-1 py-2 bg-slate-700 rounded-lg text-sm"
+                              >
+                                🗑️ Clear
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {/* Normal form after photo taken or when editing */}
+                  <div className="flex justify-between items-center mb-6">
+                    <h1 className="text-2xl font-bold">{editing ? "Edit" : "Add Expense"}</h1>
+                    {!editing && (
+                      <>
+                        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleScan} className="hidden" />
+                        <button onClick={() => fileInputRef.current?.click()} disabled={scanningLocal || scanning} className="flex items-center gap-2 px-4 py-2 bg-purple-600 rounded-xl text-sm font-medium disabled:opacity-50">
+                          {scanningLocal || scanning ? <><span className="spin">🔄</span> Scanning...</> : <>📷 Rescan</>}
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+              {/* AI Scan Result Info */}
+              {lastScanInfo && (
+                <div className={`${lastScanInfo.error ? 'bg-orange-900/30 border-orange-700/50' : 'bg-green-900/30 border-green-700/50'} border rounded-xl p-3 mb-4 slide-in`}>
+                  <div className="flex items-center gap-2">
+                    <span className={lastScanInfo.error ? 'text-orange-400' : 'text-green-400'}>
+                      {lastScanInfo.error ? '⚠️' : '✓'}
+                    </span>
+                    <span className={`${lastScanInfo.error ? 'text-orange-200' : 'text-green-200'} text-sm`}>
+                      {lastScanInfo.error 
+                        ? lastScanInfo.message 
+                        : `Detected: ${lastScanInfo.vendor || 'Receipt'}${lastScanInfo.total ? ` - $${lastScanInfo.total}` : ''}`
+                      }
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Receipt Preview */}
+              {currentReceipt && (
+                <div className="mb-4">
+                  <button
+                    onClick={() => setShowReceipt(true)}
+                    className="w-full bg-purple-900/30 border border-purple-700/50 rounded-xl p-3 flex items-center justify-between active:bg-purple-900/50"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl">🧾</span>
+                      <div className="text-left">
+                        <p className="text-purple-200 font-medium">{currentReceipt.vendor || 'Photo attached'}</p>
+                        <p className="text-purple-400 text-xs">
+                          {currentReceipt.total ? `$${currentReceipt.total}` : 'Tap to view'}
+                          {Array.isArray(currentReceipt.items) && currentReceipt.items.length > 0 && ` • ${currentReceipt.items.length} items`}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-purple-400">View →</span>
+                  </button>
+                  
+                  {/* Show AI scan button if we have image but no AI result yet */}
+                  {!currentReceipt.total && !scanningLocal && (
+                    <button
+                      onClick={runAIScan}
+                      className="w-full mt-3 py-4 bg-gradient-to-r from-cyan-600 to-blue-600 rounded-xl font-medium"
+                    >
+                      <div className="flex items-center justify-center gap-3">
+                        <span className="text-lg">✨</span>
+                        <span>Autofill with AI</span>
+                      </div>
+                      <p className="text-cyan-200/60 text-xs mt-1">Powered by Google Cloud Vision</p>
+                    </button>
+                  )}
+                  
+                  {/* Show scanning progress */}
+                  {scanningLocal && (
+                    <div className="w-full mt-3 bg-slate-800/80 rounded-xl p-4 border border-slate-700">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-white font-medium flex items-center gap-2">
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
+                          </span>
+                          {scanStatus || 'Processing...'}
+                        </span>
+                        <span className="text-cyan-400 font-bold">{scanProgress}%</span>
+                      </div>
+                      <div className="h-2 bg-slate-900 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full transition-all duration-300 ease-out"
+                          style={{ width: `${scanProgress}%` }}
+                        />
+                      </div>
+                      <p className="text-slate-500 text-xs mt-2 text-center">Reading text from receipt...</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Receipt Viewer Modal */}
+              {showReceipt && currentReceipt && (
+                <ReceiptViewer receipt={currentReceipt} onClose={() => setShowReceipt(false)} />
+              )}
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Amount</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">$</span>
+                  <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" className="w-full bg-slate-900 rounded-xl px-4 py-4 pl-10 text-2xl font-bold text-white placeholder-slate-600 outline-none" />
+                </div>
+              </div>
+              <div className="mb-4">
+                <div className="flex justify-between items-center mb-2">
+                  <label className="text-slate-400 text-sm">Category</label>
+                  <CatLangSelector showLabel={false} />
+                </div>
+                <button onClick={() => setShowCategories(true)} className="w-full bg-slate-900 rounded-xl px-4 py-3 text-left flex items-center gap-3">
+                  {category ? (
+                    <><span className="text-xl">{getCategoryById(category).icon}</span><span className="text-white">{getCategoryName(getCategoryById(category))}</span></>
+                  ) : (
+                    <span className="text-slate-600">Select</span>
+                  )}
+                </button>
+              </div>
+              {showCategories && (
+                <div className="fixed inset-0 bg-black/80 z-50 flex items-end">
+                  <div className="bg-slate-900 w-full rounded-t-3xl p-5 pb-10 max-h-[80vh] overflow-auto">
+                    <div className="flex justify-between items-center mb-4">
+                      <h2 className="text-lg font-bold text-white">Select Category</h2>
+                      <div className="flex items-center gap-2">
+                        <CatLangSelector />
+                        <button onClick={() => setShowCategories(false)} className="text-slate-400 text-2xl ml-2">×</button>
+                      </div>
+                    </div>
+                    {Object.entries({ tangihanga: 'FUNERAL', kai: 'FOOD', travel: 'TRAVEL', utilities: 'OTHER', other: '' }).map(([group, label]) => {
+                      const cats = group === 'utilities' ? [...groupedCategories.utilities, ...groupedCategories.other] : groupedCategories[group];
+                      if (!cats?.length || group === 'other') return null;
+                      return (
+                        <div key={group}>
+                          <p className="text-slate-500 text-xs font-medium mb-2 mt-4">{label}</p>
+                          <div className="grid grid-cols-3 gap-2 mb-4">
+                            {cats.map(cat => (
+                              <button key={cat.id} onClick={() => { setCategory(cat.id); setShowCategories(false); }} className={`p-3 rounded-xl flex flex-col items-center gap-1 ${category === cat.id ? 'bg-cyan-600' : 'bg-slate-800 active:bg-slate-700'}`}>
+                                <span className="text-xl">{cat.icon}</span>
+                                <span className="text-xs text-white text-center leading-tight">{getCategoryName(cat)}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Description (helps AI categorize)</label>
+                <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. Countdown, Z Station, etc" className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white placeholder-slate-600 outline-none" />
+              </div>
+              <div className="mb-4">
+                <label className="text-slate-400 text-sm mb-2 block">Paid with</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => setMethod('cash')} className={`py-3 rounded-xl font-medium ${method === 'cash' ? 'bg-green-600 text-white' : 'bg-slate-900 text-slate-400'}`}>💵 Cash</button>
+                  <button onClick={() => setMethod('bank')} className={`py-3 rounded-xl font-medium ${method === 'bank' ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400'}`}>🏦 Bank</button>
+                </div>
+              </div>
+              <div className="mb-6">
+                <label className="text-slate-400 text-sm mb-2 block">Date</label>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white" />
+              </div>
+              
+              {/* Receipt Details - Collapsible */}
+              <div className="mb-6">
+                <button 
+                  type="button"
+                  onClick={() => setShowReceiptDetails(!showReceiptDetails)}
+                  className="w-full flex items-center justify-between text-slate-400 text-sm py-2"
+                >
+                  <span className="flex items-center gap-2">
+                    <span>🧾</span>
+                    <span>Receipt Details</span>
+                    {(subtotal || gst || discount || paymentMethod) && (
+                      <span className="text-xs bg-cyan-600/30 text-cyan-400 px-2 py-0.5 rounded-full">AI filled</span>
+                    )}
+                  </span>
+                  <span className={`transition-transform ${showReceiptDetails ? 'rotate-180' : ''}`}>▼</span>
+                </button>
+                
+                {showReceiptDetails && (
+                  <div className="mt-3 space-y-3 bg-slate-900/50 rounded-xl p-4 border border-slate-800">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Subtotal</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={subtotal} 
+                            onChange={(e) => setSubtotal(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">GST (15%)</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={gst} 
+                            onChange={(e) => setGst(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Discount/Savings</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={discount} 
+                            onChange={(e) => setDiscount(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-green-400 text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Cash Out</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={cashOut} 
+                            onChange={(e) => setCashOut(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Change Given</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={change} 
+                            onChange={(e) => setChange(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Payment Method</label>
+                        <select 
+                          value={paymentMethod} 
+                          onChange={(e) => setPaymentMethod(e.target.value)}
+                          className="w-full bg-slate-800 rounded-lg px-3 py-2 text-white text-sm"
+                        >
+                          <option value="">Unknown</option>
+                          <option value="Cash">Cash</option>
+                          <option value="EFTPOS">EFTPOS</option>
+                          <option value="Visa">Visa</option>
+                          <option value="Mastercard">Mastercard</option>
+                          <option value="Paywave">Paywave</option>
+                          <option value="Debit Card">Debit Card</option>
+                          <option value="Credit Card">Credit Card</option>
+                        </select>
+                      </div>
+                    </div>
+                    
+                    {cardLastFour && (
+                      <div className="text-center text-slate-500 text-xs">
+                        Card ending in •••• {cardLastFour}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
+              <button onClick={handleSubmit} disabled={!amount || !category} className="w-full py-4 bg-gradient-to-r from-orange-600 to-red-600 rounded-xl font-bold text-lg disabled:opacity-50">{editing ? "Save" : "Add"}</button>
+              {editing && (
+                <button onClick={handleDelete} className={`w-full py-3 mt-3 rounded-xl font-medium ${confirmDelete ? 'bg-red-600 text-white' : 'bg-slate-900 text-red-400'}`}>
+                  {confirmDelete ? 'Tap again to confirm' : 'Delete'}
+                </button>
+              )}
+              
+              {/* Debug button in form view */}
+              <button 
+                onClick={(e) => { 
+                  e.preventDefault(); 
+                  setDebugLog(localStorage.getItem('scan_debug_log') || '');
+                  setShowDebugLog(true); 
+                }}
+                className="w-full py-2 mt-4 bg-slate-800 rounded-xl text-slate-500 text-sm flex items-center justify-center gap-2"
+              >
+                🐛 Debug Log
+              </button>
+              
+              {/* Debug Log Modal */}
+              {showDebugLog && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setShowDebugLog(false)}>
+                  <div className="absolute inset-0 bg-slate-950/90" />
+                  <div className="relative bg-slate-900 w-full max-w-md rounded-2xl p-4 border border-slate-700" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex justify-between items-center mb-3">
+                      <h3 className="text-white font-bold">🐛 Debug Log</h3>
+                      <button onClick={() => setShowDebugLog(false)} className="text-slate-400 text-xl">×</button>
+                    </div>
+                    <textarea 
+                      readOnly 
+                      value={debugLog || '(empty)'}
+                      className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-64"
+                      onClick={(e) => e.target.select()}
+                    />
+                    <div className="flex gap-2 mt-3">
+                      <button 
+                        onClick={async (e) => { 
+                          e.preventDefault(); 
+                          const success = await copyToClipboard(debugLog);
+                          if (success) {
+                            e.target.textContent = '✓ Copied!';
+                            setTimeout(() => { e.target.textContent = '📋 Copy'; }, 2000);
+                          } else {
+                            alert('Copy failed. Please select text and copy manually.');
+                          }
+                        }}
+                        className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium"
+                      >
+                        📋 Copy
+                      </button>
+                      <button 
+                        onClick={(e) => { e.preventDefault(); clearLog(); }}
+                        className="flex-1 py-2 bg-slate-700 rounded-lg text-sm"
+                      >
+                        🗑️ Clear
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+                </>
+              )}
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Gifts List
+      const Gifts = () => {
+        const [filter, setFilter] = useState('all');
+        const [search, setSearch] = useState('');
+        const [catFilter, setCatFilter] = useState('all');
+        
+        const filteredGifts = useMemo(() => {
+          let result = [...gifts];
+          if (filter === 'cash' || filter === 'bank') result = result.filter(g => g.method === filter);
+          if (catFilter !== 'all') result = result.filter(g => g.category === catFilter);
+          if (search.trim()) result = result.filter(g => g.donor.toLowerCase().includes(search.toLowerCase()));
+          return result.sort((a, b) => new Date(b.date) - new Date(a.date));
+        }, [gifts, filter, catFilter, search]);
+
+        // Count gifts by category
+        const categoryCounts = useMemo(() => {
+          const counts = {};
+          gifts.forEach(g => {
+            const cat = g.category || 'isi';
+            counts[cat] = (counts[cat] || 0) + 1;
+          });
+          return counts;
+        }, [gifts]);
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <h1 className="text-2xl font-bold">Meaalofa • Koha</h1>
+                  <p className="text-slate-500 text-sm">{gifts.length} total: {fmt(totals.giftsTotal)}</p>
+                </div>
+                <button onClick={() => setScreen('addGift')} className="w-10 h-10 bg-green-600 rounded-full flex items-center justify-center text-xl">+</button>
+              </div>
+              <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white placeholder-slate-600 outline-none mb-4" />
+              
+              {/* Method Filter */}
+              <div className="flex gap-2 mb-3">
+                {[{ id: 'all', label: 'All' }, { id: 'cash', label: '💵' }, { id: 'bank', label: '🏦' }].map(f => (
+                  <button key={f.id} onClick={() => setFilter(f.id)} className={`px-4 py-2 rounded-lg text-sm font-medium ${filter === f.id ? 'bg-cyan-600 text-white' : 'bg-slate-900 text-slate-400'}`}>{f.label}</button>
+                ))}
+              </div>
+
+              {/* Category Filter */}
+              <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+                <button 
+                  onClick={() => setCatFilter('all')} 
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap ${catFilter === 'all' ? 'bg-green-600 text-white' : 'bg-slate-900 text-slate-400'}`}
+                >
+                  All
+                </button>
+                {GIFT_CATEGORIES.map(cat => (
+                  <button 
+                    key={cat.id} 
+                    onClick={() => setCatFilter(cat.id)} 
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap flex items-center gap-1 ${catFilter === cat.id ? 'text-white' : 'bg-slate-900 text-slate-400'}`}
+                    style={catFilter === cat.id ? { backgroundColor: cat.color } : {}}
+                  >
+                    {cat.icon} {categoryCounts[cat.id] || 0}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-2">
+                {filteredGifts.map(g => {
+                  const cat = getGiftCategoryById(g.category);
+                  return (
+                    <div key={g.id} onClick={() => { setEditingItem(g); setScreen('editGift'); }} className="bg-slate-900 rounded-xl p-4 active:bg-slate-800">
+                      <div className="flex items-start gap-3">
+                        <div 
+                          className="w-10 h-10 rounded-full flex items-center justify-center text-lg"
+                          style={{ backgroundColor: cat.color + '30' }}
+                        >
+                          {cat.icon}
+                        </div>
+                        <div className="flex-1">
+                          <p className="font-medium text-white">{g.donor}</p>
+                          <p className="text-slate-500 text-sm">
+                            {fmtDateFull(g.date)} • {g.method === 'cash' ? '💵' : '🏦'}
+                            {g.category && g.category !== 'isi' && (
+                              <span className="ml-1" style={{ color: cat.color }}>• {cat.en}</span>
+                            )}
+                          </p>
+                        </div>
+                        <p className="text-green-400 font-bold text-lg">{fmt(g.amount)}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {filteredGifts.length === 0 && <div className="text-center py-12"><span className="text-4xl mb-4 block">🎁</span><p className="text-slate-400">No gifts yet</p></div>}
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Expenses List
+      const Expenses = () => {
+        const [filter, setFilter] = useState('all');
+        const [search, setSearch] = useState('');
+        const [showTransfers, setShowTransfers] = useState(false);
+        
+        const filteredExpenses = useMemo(() => {
+          let result = [...expenses];
+          if (filter === 'cash' || filter === 'bank') result = result.filter(e => e.method === filter);
+          if (filter === 'receipts') result = result.filter(e => !!e.receipt);
+          if (search.trim()) result = result.filter(e => e.description?.toLowerCase().includes(search.toLowerCase()) || getCategoryById(e.category).en.toLowerCase().includes(search.toLowerCase()));
+          return result.sort((a, b) => new Date(b.date) - new Date(a.date));
+        }, [expenses, filter, search]);
+        
+        const receiptCount = useMemo(() => expenses.filter(e => !!e.receipt).length, [expenses]);
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-white pb-24">
+            <div className="px-5 pt-8">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <h1 className="text-2xl font-bold">Tau • Utu</h1>
+                  <p className="text-slate-500 text-sm">{expenses.length} total: {fmt(totals.expensesTotal)}</p>
+                </div>
+                <div className="flex gap-2">
+                  <CatLangSelector showLabel={false} />
+                  <button onClick={() => setScreen('addExpense')} className="w-10 h-10 bg-orange-600 rounded-full flex items-center justify-center text-xl">+</button>
+                </div>
+              </div>
+              <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white placeholder-slate-600 outline-none mb-4" />
+              <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+                {[
+                  { id: 'all', label: 'All' }, 
+                  { id: 'cash', label: '💵' }, 
+                  { id: 'bank', label: '🏦' },
+                  { id: 'receipts', label: `🧾 ${receiptCount}` }
+                ].map(f => (
+                  <button key={f.id} onClick={() => setFilter(f.id)} className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap ${filter === f.id ? 'bg-cyan-600 text-white' : 'bg-slate-900 text-slate-400'}`}>{f.label}</button>
+                ))}
+              </div>
+              {transfers.length > 0 && (
+                <div className="mb-4">
+                  <button onClick={() => setShowTransfers(!showTransfers)} className="w-full bg-blue-900/30 border border-blue-700/50 rounded-xl p-3 flex justify-between items-center">
+                    <span className="text-blue-400 text-sm">💵→🏦 Deposits ({transfers.length})</span>
+                    <span className="text-blue-400 font-medium">{fmt(totals.transferredToBank)}</span>
+                  </button>
+                  {showTransfers && (
+                    <div className="mt-2 space-y-2">
+                      {transfers.sort((a, b) => new Date(b.date) - new Date(a.date)).map(t => (
+                        <div key={t.id} className="bg-slate-900 rounded-xl p-3 flex justify-between items-center">
+                          <div>
+                            <p className="text-white text-sm">{fmtDateFull(t.date)}</p>
+                            {t.note && <p className="text-slate-500 text-xs">{t.note}</p>}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <p className="text-blue-400 font-medium">{fmt(t.amount)}</p>
+                            <button onClick={() => { if (confirm('Delete?')) deleteTransfer(t.id); }} className="text-red-400 text-xs px-2 py-1 bg-red-900/30 rounded">✕</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="space-y-2">
+                {filteredExpenses.map(e => {
+                  const cat = getCategoryById(e.category);
+                  const result = validationResults[e.id];
+                  const flagged = result && !result.correct && !result.dismissed && !result.applied;
+                  const hasReceipt = !!e.receipt;
+                  return (
+                    <div key={e.id} onClick={() => { setEditingItem(e); setScreen('editExpense'); }} className={`bg-slate-900 rounded-xl p-4 active:bg-slate-800 ${flagged ? 'border border-amber-500/50' : ''}`}>
+                      <div className="flex items-start gap-3">
+                        <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center relative">
+                          <span>{cat.icon}</span>
+                          {hasReceipt && (
+                            <span className="absolute -bottom-1 -right-1 w-5 h-5 bg-purple-600 rounded-full flex items-center justify-center text-xs">🧾</span>
+                          )}
+                        </div>
+                        <div className="flex-1">
+                          <p className="font-medium text-white">{e.description || getCategoryName(cat)}</p>
+                          <p className="text-slate-500 text-sm">
+                            {fmtDateFull(e.date)} • {e.method === 'cash' ? '💵' : '🏦'}
+                            {hasReceipt && <span className="text-purple-400 ml-1">• Receipt</span>}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-red-400 font-bold text-lg">{fmt(e.amount)}</p>
+                          {flagged && <span className="text-amber-400 text-xs">⚠️ Review</span>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {filteredExpenses.length === 0 && <div className="text-center py-12"><span className="text-4xl mb-4 block">💸</span><p className="text-slate-400">No expenses yet</p></div>}
+            </div>
+            <Nav />
+          </div>
+        );
+      };
+
+      // Route screens
+      const screens = {
+        home: Home,
+        gifts: Gifts,
+        expenses: Expenses,
+        analytics: Analytics,
+        sync: SyncScreen,
+        addGift: () => <AddGift editing={false} />,
+        addExpense: () => <AddExpense editing={false} />,
+        editGift: () => <AddGift editing={true} />,
+        editExpense: () => <AddExpense editing={true} />,
+        addTransfer: AddTransfer
+      };
+
+      const Screen = screens[screen] || Home;
+      return <Screen />;
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
