@@ -979,14 +979,23 @@ Respond with ONLY valid JSON:
             scannedAt: new Date().toISOString()
           };
 
-          // SAVE TO LOCALSTORAGE IMMEDIATELY before any state updates
-          // This ensures we don't lose the result if page reloads
+          // SAVE TO STORAGE IMMEDIATELY before any state updates
+          // Use both localStorage AND sessionStorage for redundancy
           try {
-            localStorage.setItem('pending_scan_result', JSON.stringify({
+            const toSave = JSON.stringify({
               ...finalResult,
               savedAt: Date.now()
-            }));
-            apiLog('Saved result to localStorage immediately');
+            });
+            localStorage.setItem('pending_scan_result', toSave);
+            sessionStorage.setItem('pending_scan_result', toSave);
+            apiLog('Saved result to both localStorage and sessionStorage');
+            
+            // Small delay then reload to ensure write completes
+            apiLog('Will reload in 100ms for recovery...');
+            setTimeout(() => {
+              window.location.reload();
+            }, 100);
+            return finalResult;
           } catch (e) {
             apiLog('Failed to save result: ' + e.message);
           }
@@ -2661,12 +2670,12 @@ Respond with ONLY valid JSON:
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing + ', photoTaken=' + photoTaken);
           
-          // DEBUG: Check what's in localStorage
-          const hasResult = localStorage.getItem('pending_scan_result');
-          const hasImage = localStorage.getItem('pending_scan_image');
-          log('localStorage check: hasResult=' + (hasResult ? 'YES(' + hasResult.length + ' chars)' : 'NO') + ', hasImage=' + (hasImage ? 'YES' : 'NO'));
+          // DEBUG: Check what's in storage
+          const hasResult = localStorage.getItem('pending_scan_result') || sessionStorage.getItem('pending_scan_result');
+          const hasImage = localStorage.getItem('pending_scan_image') || sessionStorage.getItem('pending_scan_image');
+          log('storage check: hasResult=' + (hasResult ? 'YES(' + hasResult.length + ' chars)' : 'NO') + ', hasImage=' + (hasImage ? 'YES' : 'NO'));
           
-          // Check if we have a completed scan result to recover
+          // Check if we have a completed scan result to recover (try both storages)
           if (hasResult && !editing) {
             try {
               const result = JSON.parse(hasResult);
@@ -2696,6 +2705,9 @@ Respond with ONLY valid JSON:
                 localStorage.removeItem('pending_scan_result');
                 localStorage.removeItem('pending_scan_image');
                 localStorage.removeItem('pending_scan_time');
+                sessionStorage.removeItem('pending_scan_result');
+                sessionStorage.removeItem('pending_scan_image');
+                sessionStorage.removeItem('pending_scan_time');
                 log('Result recovered and form filled!');
                 return;
               } else {
@@ -2708,8 +2720,8 @@ Respond with ONLY valid JSON:
           }
           
           // Check if we have a pending image (no result yet)
-          const pendingImage = localStorage.getItem('pending_scan_image');
-          const pendingTime = localStorage.getItem('pending_scan_time');
+          const pendingImage = localStorage.getItem('pending_scan_image') || sessionStorage.getItem('pending_scan_image');
+          const pendingTime = localStorage.getItem('pending_scan_time') || sessionStorage.getItem('pending_scan_time');
           
           if (pendingImage && pendingTime && !editing && !photoTaken) {
             const age = Date.now() - parseInt(pendingTime);
@@ -3025,13 +3037,15 @@ Respond with ONLY valid JSON:
             };
             
             const saveAndShowForm = (imageData) => {
-              // Save to localStorage SYNCHRONOUSLY
+              // Save to BOTH localStorage and sessionStorage for redundancy
               try {
                 localStorage.setItem('pending_scan_image', imageData);
                 localStorage.setItem('pending_scan_time', Date.now().toString());
-                log('Saved to localStorage');
+                sessionStorage.setItem('pending_scan_image', imageData);
+                sessionStorage.setItem('pending_scan_time', Date.now().toString());
+                log('Saved to localStorage and sessionStorage');
               } catch (err) {
-                log('localStorage error: ' + err.message);
+                log('storage error: ' + err.message);
               }
               
               // Update state synchronously
