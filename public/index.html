@@ -1022,6 +1022,10 @@ Respond with ONLY valid JSON:
           // Parse the text to extract receipt info
           const parsedData = parseReceiptText(text);
           apiLog('Parsed: total=' + parsedData.total + ', vendor=' + parsedData.vendor + ', category=' + parsedData.category);
+          if (parsedData.subtotal) apiLog('Subtotal: ' + parsedData.subtotal);
+          if (parsedData.gst) apiLog('GST: ' + parsedData.gst);
+          if (parsedData.discount) apiLog('Discount: ' + parsedData.discount);
+          if (parsedData.paymentMethod) apiLog('Payment: ' + parsedData.paymentMethod);
           
           const finalResult = {
             total: parsedData.total,
@@ -1030,6 +1034,15 @@ Respond with ONLY valid JSON:
             time: parsedData.time,
             items: parsedData.items,
             category: parsedData.category,
+            // Receipt details
+            subtotal: parsedData.subtotal,
+            gst: parsedData.gst,
+            discount: parsedData.discount,
+            cashOut: parsedData.cashOut,
+            change: parsedData.change,
+            paymentMethod: parsedData.paymentMethod,
+            cardLastFour: parsedData.cardLastFour,
+            // Meta
             rawText: text,
             originalImage: imageData,
             scannedAt: new Date().toISOString()
@@ -1079,8 +1092,21 @@ Respond with ONLY valid JSON:
       };
       
       // Parse receipt text to extract structured data
+      // RECEIPT STRUCTURE:
+      // - TOP (lines 1-5): Store name, address, phone number
+      // - MIDDLE: Item names with prices (usually "Item Name    $X.XX")
+      // - BOTTOM (last 10-15 lines): Subtotal, GST, TOTAL, payment method, date/time
+      // The TOTAL is almost ALWAYS near the bottom, labeled "TOTAL", "EFTPOS", "PAID", etc.
+      
       const parseReceiptText = (text) => {
-        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        // Clean up OCR artifacts and normalize text
+        const cleanText = text
+          .replace(/[|]/g, 'I')  // Common OCR error
+          .replace(/[oO](?=\d)/g, '0')  // O before numbers is probably 0
+          .replace(/(?<=\d)[oO]/g, '0')  // O after numbers is probably 0
+          .replace(/\s{2,}/g, ' ');  // Multiple spaces to single
+        
+        const lines = cleanText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
         
         let total = 0;
         let vendor = '';
@@ -1089,38 +1115,138 @@ Respond with ONLY valid JSON:
         let category = 'misc';
         const items = [];
         
-        // Common NZ store patterns
+        // =====================
+        // STEP 1: FIND THE TOTAL
+        // =====================
+        // The total is the most important field. It's usually:
+        // - Near the BOTTOM of the receipt (last 15 lines)
+        // - Labeled with: TOTAL, EFTPOS, PAID, AMOUNT, DUE, BALANCE, SALE
+        // - The LARGEST amount on the receipt (but we prefer labeled amounts)
+        
+        const totalKeywords = ['total', 'eftpos', 'paid', 'amount', 'due', 'balance', 'sale total', 'grand total', 'payment', 'tender', 'visa', 'mastercard', 'debit', 'credit'];
+        const excludeKeywords = ['subtotal', 'sub total', 'sub-total', 'gst', 'tax', 'change', 'rounding', 'discount', 'savings'];
+        
+        // Look in bottom 15 lines first (where total usually is)
+        const bottomLines = lines.slice(-15);
+        let foundLabeledTotal = false;
+        
+        for (const line of bottomLines.reverse()) {
+          const lineLower = line.toLowerCase();
+          
+          // Skip lines with exclude keywords
+          if (excludeKeywords.some(kw => lineLower.includes(kw))) continue;
+          
+          // Check if line has a total keyword
+          const hasKeyword = totalKeywords.some(kw => lineLower.includes(kw));
+          
+          if (hasKeyword) {
+            // Extract amount from this line
+            const amountMatch = line.match(/\$?\s*(\d{1,4})[.,](\d{2})\b/);
+            if (amountMatch) {
+              const amount = parseFloat(amountMatch[1] + '.' + amountMatch[2]);
+              if (amount > 0 && amount < 50000) {
+                total = amount;
+                foundLabeledTotal = true;
+                break;
+              }
+            }
+          }
+        }
+        
+        // If no labeled total found, find the largest amount in bottom section
+        if (!foundLabeledTotal) {
+          const amounts = [];
+          for (const line of bottomLines) {
+            const matches = line.match(/\$?\s*(\d{1,4})[.,](\d{2})\b/g);
+            if (matches) {
+              for (const m of matches) {
+                const clean = m.replace(/[$\s]/g, '').replace(',', '.');
+                const amount = parseFloat(clean);
+                if (amount > 0.50 && amount < 50000) {
+                  amounts.push(amount);
+                }
+              }
+            }
+          }
+          if (amounts.length > 0) {
+            // Take the largest amount
+            total = Math.max(...amounts);
+          }
+        }
+        
+        // If still no total, search entire receipt for largest amount
+        if (total === 0) {
+          const allAmounts = [];
+          for (const line of lines) {
+            const matches = line.match(/\$?\s*(\d{1,4})[.,](\d{2})\b/g);
+            if (matches) {
+              for (const m of matches) {
+                const clean = m.replace(/[$\s]/g, '').replace(',', '.');
+                const amount = parseFloat(clean);
+                if (amount > 0.50 && amount < 50000) {
+                  allAmounts.push(amount);
+                }
+              }
+            }
+          }
+          if (allAmounts.length > 0) {
+            total = Math.max(...allAmounts);
+          }
+        }
+        
+        // =====================
+        // STEP 2: FIND THE VENDOR/STORE NAME
+        // =====================
+        // The store name is usually:
+        // - In the FIRST 1-3 lines
+        // - NOT a date, time, address, phone, or generic word
+        // - Often in ALL CAPS or is a known store name
+        
         const storePatterns = {
           'countdown': { name: 'Countdown', category: 'kai' },
           'pak n save': { name: 'Pak n Save', category: 'kai' },
           'paknsave': { name: 'Pak n Save', category: 'kai' },
+          'pak\'n\'save': { name: 'Pak n Save', category: 'kai' },
           'new world': { name: 'New World', category: 'kai' },
           'fresh choice': { name: 'Fresh Choice', category: 'kai' },
           'woolworths': { name: 'Woolworths', category: 'kai' },
           'four square': { name: 'Four Square', category: 'kai' },
+          'foursquare': { name: 'Four Square', category: 'kai' },
+          'supervalue': { name: 'SuperValue', category: 'kai' },
           'kfc': { name: 'KFC', category: 'catering' },
           'mcdonald': { name: 'McDonalds', category: 'catering' },
-          'subway': { name: 'Subway', category: 'catering' },
           'burger king': { name: 'Burger King', category: 'catering' },
           'wendy': { name: 'Wendys', category: 'catering' },
+          'subway': { name: 'Subway', category: 'catering' },
+          'pizza hut': { name: 'Pizza Hut', category: 'catering' },
+          'domino': { name: 'Dominos', category: 'catering' },
+          'starbucks': { name: 'Starbucks', category: 'catering' },
           'super liquor': { name: 'Super Liquor', category: 'drinks' },
           'liquorland': { name: 'Liquorland', category: 'drinks' },
-          'bottle': { name: 'Bottle Store', category: 'drinks' },
+          'bottle-o': { name: 'Bottle-O', category: 'drinks' },
+          'henry\'s': { name: 'Henrys', category: 'drinks' },
           'z energy': { name: 'Z Energy', category: 'petrol' },
+          'z station': { name: 'Z Energy', category: 'petrol' },
           'bp ': { name: 'BP', category: 'petrol' },
+          'bp connect': { name: 'BP', category: 'petrol' },
           'mobil': { name: 'Mobil', category: 'petrol' },
           'gull': { name: 'Gull', category: 'petrol' },
           'caltex': { name: 'Caltex', category: 'petrol' },
+          'npd': { name: 'NPD', category: 'petrol' },
+          'waitomo': { name: 'Waitomo', category: 'petrol' },
           'kmart': { name: 'Kmart', category: 'clothing' },
           'farmers': { name: 'Farmers', category: 'clothing' },
           'warehouse stationery': { name: 'Warehouse Stationery', category: 'printing' },
           'the warehouse': { name: 'The Warehouse', category: 'clothing' },
           'mitre 10': { name: 'Mitre 10', category: 'misc' },
-          'bunnings': { name: 'Bunnings', category: 'misc' }
+          'mitre10': { name: 'Mitre 10', category: 'misc' },
+          'bunnings': { name: 'Bunnings', category: 'misc' },
+          'briscoes': { name: 'Briscoes', category: 'misc' },
+          'rebel sport': { name: 'Rebel Sport', category: 'misc' }
         };
         
-        // Find vendor from first few lines
-        const headerText = lines.slice(0, 5).join(' ').toLowerCase();
+        // Check first 8 lines for known store names
+        const headerText = lines.slice(0, 8).join(' ').toLowerCase();
         for (const [pattern, info] of Object.entries(storePatterns)) {
           if (headerText.includes(pattern)) {
             vendor = info.name;
@@ -1129,41 +1255,61 @@ Respond with ONLY valid JSON:
           }
         }
         
-        // Skip generic words that aren't actual store names
-        const genericWords = ['cash receipt', 'receipt', 'tax invoice', 'invoice', 'eftpos', 'customer copy'];
-        
-        // If no vendor found, look for address pattern
+        // If no known store, look for the store name in first few lines
         if (!vendor) {
-          // Also look for "Address:" or "Adress:" lines
-          const addressLinePattern = /(?:address|adress)[:\s]+(.+)/i;
-          for (const line of lines.slice(0, 8)) {
-            const addrMatch = line.match(addressLinePattern);
-            if (addrMatch && addrMatch[1].length > 5) {
-              vendor = addrMatch[1].trim().substring(0, 40);
-              break;
-            }
+          // Words/patterns to SKIP (these are NOT store names)
+          const skipPatterns = [
+            /^cash\s*(receipt)?$/i,
+            /^(tax\s*)?invoice$/i,
+            /^receipt$/i,
+            /^eftpos$/i,
+            /^customer\s*copy$/i,
+            /^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}/,  // Date pattern
+            /^\d{1,2}:\d{2}/,  // Time pattern
+            /^tel[:\s]/i,
+            /^phone[:\s]/i,
+            /^ph[:\s]/i,
+            /^fax[:\s]/i,
+            /^gst[:\s#]/i,
+            /^abn[:\s]/i,
+            /^nzbn[:\s]/i,
+            /www\./i,
+            /\.co\.nz/i,
+            /\.com/i,
+            /^[A-Z]{2,3}\d{5,}/,  // Looks like a code
+            /^\d+$/,  // Just numbers
+            /^[\W]+$/,  // Just symbols
+          ];
+          
+          for (const line of lines.slice(0, 6)) {
+            const trimmed = line.trim();
+            
+            // Skip very short or very long lines
+            if (trimmed.length < 3 || trimmed.length > 50) continue;
+            
+            // Skip lines matching skip patterns
+            const shouldSkip = skipPatterns.some(p => p.test(trimmed));
+            if (shouldSkip) continue;
+            
+            // Skip lines that look like addresses (have street type words)
+            if (/\b(street|st|road|rd|avenue|ave|drive|dr|lane|ln|place|pl|way|crescent|cres|terrace|tce)\b/i.test(trimmed)) continue;
+            
+            // Skip lines that are mostly numbers (like phone numbers)
+            const digitCount = (trimmed.match(/\d/g) || []).length;
+            if (digitCount > trimmed.length * 0.5) continue;
+            
+            // This looks like a store name!
+            vendor = trimmed.substring(0, 40);
+            break;
           }
         }
         
-        // Try street address pattern
+        // Still no vendor? Try to find an address line and use that
         if (!vendor) {
-          const addressPattern = /(\d+\s+[A-Za-z]+(?:\s+[A-Za-z]+)*(?:\s+(?:street|st|road|rd|avenue|ave|drive|dr|lane|ln|place|pl|way|crescent|cres))?)/i;
-          for (const line of lines.slice(0, 8)) {
-            const match = line.match(addressPattern);
-            if (match && match[1].length > 5) {
-              vendor = match[1].trim();
-              break;
-            }
-          }
-        }
-        
-        // If still no vendor, use first non-generic line
-        if (!vendor && lines.length > 0) {
-          for (const line of lines.slice(0, 5)) {
-            const cleanLine = line.trim();
-            const isGeneric = genericWords.some(g => cleanLine.toLowerCase().includes(g));
-            if (cleanLine.length > 2 && cleanLine.length < 40 && !isGeneric) {
-              vendor = cleanLine;
+          for (const line of lines.slice(0, 10)) {
+            const addressMatch = line.match(/^(\d+\s+[A-Za-z].{5,30})/);
+            if (addressMatch && /\b(street|st|road|rd|avenue|ave|drive|dr)\b/i.test(addressMatch[1])) {
+              vendor = addressMatch[1].trim();
               break;
             }
           }
@@ -1174,98 +1320,185 @@ Respond with ONLY valid JSON:
           vendor = 'Receipt';
         }
         
-        // Find total - look for common patterns
-        const totalPatterns = [
-          /(?:total|eftpos|paid|amount|due|balance)[:\s]*\$?\s*(\d+[.,]\d{2})/i,
-          /\$\s*(\d+[.,]\d{2})\s*(?:total|eftpos|paid)?/i,
-          /(\d+[.,]\d{2})\s*(?:total|eftpos|paid|nzd)/i
-        ];
+        // =====================
+        // STEP 3: FIND THE DATE
+        // =====================
+        // Date is usually in format: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+        // Often on the same line as time, near top or bottom
         
-        // Search from bottom up (total usually at end)
-        const reversedLines = [...lines].reverse();
-        for (const line of reversedLines) {
-          for (const pattern of totalPatterns) {
-            const match = line.match(pattern);
-            if (match) {
-              const amount = parseFloat(match[1].replace(',', '.'));
-              if (amount > total && amount < 10000) { // Sanity check
-                total = amount;
-              }
-            }
-          }
-          if (total > 0) break;
-        }
-        
-        // If no total found, look for largest amount
-        if (total === 0) {
-          const amounts = [];
-          for (const line of lines) {
-            const matches = line.match(/\$?\s*(\d+[.,]\d{2})/g);
-            if (matches) {
-              for (const m of matches) {
-                const amount = parseFloat(m.replace(/[$,]/g, '').replace(',', '.'));
-                if (amount > 0 && amount < 10000) {
-                  amounts.push(amount);
-                }
-              }
-            }
-          }
-          if (amounts.length > 0) {
-            total = Math.max(...amounts);
-          }
-        }
-        
-        // Find date
         const datePatterns = [
-          /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/,
-          /(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/
+          /(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})/,  // DD/MM/YYYY
+          /(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})\b/,  // DD/MM/YY
+          /(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})/,  // YYYY/MM/DD
         ];
         
         for (const line of lines) {
+          // Skip lines that look like item lines (have prices)
+          if (/\$\s*\d+\.\d{2}/.test(line) && !/date/i.test(line)) continue;
+          
           for (const pattern of datePatterns) {
             const match = line.match(pattern);
             if (match) {
-              // Try to parse date
-              if (match[3] && match[3].length === 4) {
-                date = `${match[3]}-${match[2].padStart(2,'0')}-${match[1].padStart(2,'0')}`;
-              } else if (match[1] && match[1].length === 4) {
-                date = `${match[1]}-${match[2].padStart(2,'0')}-${match[3].padStart(2,'0')}`;
+              let day, month, year;
+              
+              if (match[1].length === 4) {
+                // YYYY/MM/DD format
+                year = match[1];
+                month = match[2].padStart(2, '0');
+                day = match[3].padStart(2, '0');
+              } else if (match[3].length === 4) {
+                // DD/MM/YYYY format
+                day = match[1].padStart(2, '0');
+                month = match[2].padStart(2, '0');
+                year = match[3];
               } else {
-                const year = match[3].length === 2 ? '20' + match[3] : match[3];
-                date = `${year}-${match[2].padStart(2,'0')}-${match[1].padStart(2,'0')}`;
+                // DD/MM/YY format
+                day = match[1].padStart(2, '0');
+                month = match[2].padStart(2, '0');
+                year = '20' + match[3];
               }
-              break;
+              
+              // Validate date parts
+              const dayNum = parseInt(day);
+              const monthNum = parseInt(month);
+              if (dayNum >= 1 && dayNum <= 31 && monthNum >= 1 && monthNum <= 12) {
+                date = `${year}-${month}-${day}`;
+                break;
+              }
             }
           }
           if (date) break;
         }
         
-        // Find time
-        const timePattern = /(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(am|pm))?/i;
+        // =====================
+        // STEP 4: FIND THE TIME
+        // =====================
+        const timePattern = /\b(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(am|pm))?\b/i;
         for (const line of lines) {
           const match = line.match(timePattern);
           if (match) {
             let hour = parseInt(match[1]);
-            if (match[4]?.toLowerCase() === 'pm' && hour < 12) hour += 12;
-            if (match[4]?.toLowerCase() === 'am' && hour === 12) hour = 0;
-            time = `${hour.toString().padStart(2,'0')}:${match[2]}`;
-            break;
+            const minute = match[2];
+            
+            // Handle AM/PM
+            if (match[4]) {
+              if (match[4].toLowerCase() === 'pm' && hour < 12) hour += 12;
+              if (match[4].toLowerCase() === 'am' && hour === 12) hour = 0;
+            }
+            
+            // Validate time
+            if (hour >= 0 && hour <= 23) {
+              time = `${hour.toString().padStart(2, '0')}:${minute}`;
+              break;
+            }
           }
         }
         
-        // Extract items (lines with prices)
-        const itemPattern = /^(.+?)\s+\$?\s*(\d+[.,]\d{2})\s*$/;
+        // =====================
+        // STEP 5: EXTRACT RECEIPT DETAILS
+        // =====================
+        // Subtotal, GST, discount, change, payment method
+        
+        let subtotal = 0;
+        let gst = 0;
+        let discount = 0;
+        let cashOut = 0;
+        let change = 0;
+        let paymentMethod = '';
+        let cardLastFour = '';
+        
+        // Payment method detection
+        const paymentKeywords = {
+          'visa': 'Visa',
+          'mastercard': 'Mastercard',
+          'eftpos': 'EFTPOS',
+          'debit': 'Debit Card',
+          'credit': 'Credit Card',
+          'cash': 'Cash',
+          'paywave': 'Paywave',
+          'contactless': 'Contactless'
+        };
+        
         for (const line of lines) {
+          const lineLower = line.toLowerCase();
+          
+          // Subtotal
+          if (/sub.?total/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) subtotal = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // GST/Tax
+          if (/\bgst\b|goods.*service.*tax|\btax\b/i.test(line) && !/gst\s*(no|number|#|reg)/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) gst = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Discount/Savings
+          if (/discount|savings?|less|off|promo/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) discount = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Cash out
+          if (/cash\s*out/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) cashOut = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Change
+          if (/\bchange\b/i.test(line) && !/no change|keep.*change/i.test(line)) {
+            const match = line.match(/\$?\s*(\d{1,4})[.,](\d{2})/);
+            if (match) change = parseFloat(match[1] + '.' + match[2]);
+          }
+          
+          // Payment method
+          for (const [keyword, method] of Object.entries(paymentKeywords)) {
+            if (lineLower.includes(keyword)) {
+              paymentMethod = method;
+              break;
+            }
+          }
+          
+          // Card last 4 digits (e.g., "****1234" or "XXXX1234")
+          const cardMatch = line.match(/[*xX]{4}\s*(\d{4})/);
+          if (cardMatch) cardLastFour = cardMatch[1];
+        }
+        
+        // =====================
+        // STEP 6: EXTRACT ITEMS (optional)
+        // =====================
+        // Items are usually in the middle, format: "Item Name    $X.XX"
+        const itemPattern = /^(.{3,35}?)\s+\$?\s*(\d{1,3})[.,](\d{2})\s*$/;
+        for (const line of lines) {
+          // Skip lines with total keywords
+          if (/total|subtotal|gst|tax|eftpos|paid|change/i.test(line)) continue;
+          
           const match = line.match(itemPattern);
-          if (match && match[1].length > 2 && match[1].length < 40) {
-            const price = parseFloat(match[2].replace(',', '.'));
-            if (price > 0 && price < total) {
+          if (match) {
+            const price = parseFloat(match[2] + '.' + match[3]);
+            if (price > 0 && price < total && price < 1000) {
               items.push({ name: match[1].trim(), price });
             }
           }
         }
         
-        return { total, vendor, date, time, category, items };
+        return { 
+          total, 
+          vendor, 
+          date, 
+          time, 
+          category, 
+          items,
+          // Receipt details
+          subtotal: subtotal || null,
+          gst: gst || null,
+          discount: discount || null,
+          cashOut: cashOut || null,
+          change: change || null,
+          paymentMethod: paymentMethod || null,
+          cardLastFour: cardLastFour || null
+        };
       };
 
       // Calculated values
@@ -2719,6 +2952,17 @@ Respond with ONLY valid JSON:
         const [scanStatus, setScanStatus] = useState('');
         const [debugLog, setDebugLog] = useState(() => localStorage.getItem('scan_debug_log') || '');
         const [showDebugLog, setShowDebugLog] = useState(false);
+        const [showReceiptDetails, setShowReceiptDetails] = useState(false);
+        
+        // Receipt detail fields (optional, AI-filled)
+        const [subtotal, setSubtotal] = useState(editing && editingItem?.subtotal ? editingItem.subtotal.toString() : '');
+        const [gst, setGst] = useState(editing && editingItem?.gst ? editingItem.gst.toString() : '');
+        const [discount, setDiscount] = useState(editing && editingItem?.discount ? editingItem.discount.toString() : '');
+        const [cashOut, setCashOut] = useState(editing && editingItem?.cashOut ? editingItem.cashOut.toString() : '');
+        const [change, setChange] = useState(editing && editingItem?.change ? editingItem.change.toString() : '');
+        const [paymentMethod, setPaymentMethod] = useState(editing && editingItem?.paymentMethod || '');
+        const [cardLastFour, setCardLastFour] = useState(editing && editingItem?.cardLastFour || '');
+        
         const fileInputRef = useRef(null);
         const canvasRef = useRef(null);
         
@@ -2765,12 +3009,41 @@ Respond with ONLY valid JSON:
                 if (result.category) setCategory(result.category);
                 if (result.date) setDate(result.date);
                 
+                // Recover receipt details
+                if (result.subtotal) setSubtotal(result.subtotal.toString());
+                if (result.gst) setGst(result.gst.toString());
+                if (result.discount) setDiscount(result.discount.toString());
+                if (result.cashOut) setCashOut(result.cashOut.toString());
+                if (result.change) setChange(result.change.toString());
+                if (result.paymentMethod) {
+                  setPaymentMethod(result.paymentMethod);
+                  // Also set payment method
+                  if (result.paymentMethod === 'Cash') {
+                    setMethod('cash');
+                  } else {
+                    setMethod('bank');
+                  }
+                }
+                if (result.cardLastFour) setCardLastFour(result.cardLastFour);
+                
+                // Show receipt details if any were recovered
+                if (result.subtotal || result.gst || result.discount || result.paymentMethod) {
+                  setShowReceiptDetails(true);
+                }
+                
                 setPendingReceipt({
                   originalImage: result.originalImage,
                   vendor: result.vendor,
                   total: result.total,
                   items: result.items,
-                  rawText: result.rawText
+                  rawText: result.rawText,
+                  subtotal: result.subtotal,
+                  gst: result.gst,
+                  discount: result.discount,
+                  cashOut: result.cashOut,
+                  change: result.change,
+                  paymentMethod: result.paymentMethod,
+                  cardLastFour: result.cardLastFour
                 });
                 setPhotoTaken(true);
                 setLastScanInfo({ vendor: result.vendor, total: result.total, success: true, message: 'Recovered! Review and save.' });
@@ -2901,6 +3174,47 @@ Respond with ONLY valid JSON:
                 setDescription(result.vendor);
               }
               
+              // Set receipt details if available
+              if (result.subtotal) {
+                log('Setting subtotal: ' + result.subtotal);
+                setSubtotal(result.subtotal.toString());
+              }
+              if (result.gst) {
+                log('Setting GST: ' + result.gst);
+                setGst(result.gst.toString());
+              }
+              if (result.discount) {
+                log('Setting discount: ' + result.discount);
+                setDiscount(result.discount.toString());
+              }
+              if (result.cashOut) {
+                log('Setting cashOut: ' + result.cashOut);
+                setCashOut(result.cashOut.toString());
+              }
+              if (result.change) {
+                log('Setting change: ' + result.change);
+                setChange(result.change.toString());
+              }
+              if (result.paymentMethod) {
+                log('Setting paymentMethod: ' + result.paymentMethod);
+                setPaymentMethod(result.paymentMethod);
+                // Also set the expense method based on payment method
+                if (['Cash'].includes(result.paymentMethod)) {
+                  setMethod('cash');
+                } else if (['Visa', 'Mastercard', 'EFTPOS', 'Debit Card', 'Credit Card', 'Paywave', 'Contactless'].includes(result.paymentMethod)) {
+                  setMethod('bank');
+                }
+              }
+              if (result.cardLastFour) {
+                log('Setting cardLastFour: ' + result.cardLastFour);
+                setCardLastFour(result.cardLastFour);
+              }
+              
+              // Show receipt details section if we have any details
+              if (result.subtotal || result.gst || result.discount || result.paymentMethod) {
+                setShowReceiptDetails(true);
+              }
+              
               setPendingReceipt(prev => ({
                 ...prev,
                 vendor: result.vendor,
@@ -2908,7 +3222,14 @@ Respond with ONLY valid JSON:
                 total: result.total,
                 date: result.date,
                 time: result.time,
-                rawText: result.rawText
+                rawText: result.rawText,
+                subtotal: result.subtotal,
+                gst: result.gst,
+                discount: result.discount,
+                cashOut: result.cashOut,
+                change: result.change,
+                paymentMethod: result.paymentMethod,
+                cardLastFour: result.cardLastFour
               }));
               
               setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
@@ -3167,7 +3488,15 @@ Respond with ONLY valid JSON:
             description: description.trim(), 
             method, 
             date,
-            receipt: pendingReceipt || (editing && editingItem?.receipt) || null
+            receipt: pendingReceipt || (editing && editingItem?.receipt) || null,
+            // Optional receipt details (only included if filled)
+            ...(subtotal && { subtotal: parseFloat(subtotal) }),
+            ...(gst && { gst: parseFloat(gst) }),
+            ...(discount && { discount: parseFloat(discount) }),
+            ...(cashOut && { cashOut: parseFloat(cashOut) }),
+            ...(change && { change: parseFloat(change) }),
+            ...(paymentMethod && { paymentMethod }),
+            ...(cardLastFour && { cardLastFour })
           };
           if (editing && editingItem) updateExpense(editingItem.id, expenseData);
           else addExpense(expenseData);
@@ -3466,6 +3795,126 @@ Respond with ONLY valid JSON:
                 <label className="text-slate-400 text-sm mb-2 block">Date</label>
                 <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full bg-slate-900 rounded-xl px-4 py-3 text-white" />
               </div>
+              
+              {/* Receipt Details - Collapsible */}
+              <div className="mb-6">
+                <button 
+                  type="button"
+                  onClick={() => setShowReceiptDetails(!showReceiptDetails)}
+                  className="w-full flex items-center justify-between text-slate-400 text-sm py-2"
+                >
+                  <span className="flex items-center gap-2">
+                    <span>🧾</span>
+                    <span>Receipt Details</span>
+                    {(subtotal || gst || discount || paymentMethod) && (
+                      <span className="text-xs bg-cyan-600/30 text-cyan-400 px-2 py-0.5 rounded-full">AI filled</span>
+                    )}
+                  </span>
+                  <span className={`transition-transform ${showReceiptDetails ? 'rotate-180' : ''}`}>▼</span>
+                </button>
+                
+                {showReceiptDetails && (
+                  <div className="mt-3 space-y-3 bg-slate-900/50 rounded-xl p-4 border border-slate-800">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Subtotal</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={subtotal} 
+                            onChange={(e) => setSubtotal(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">GST (15%)</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={gst} 
+                            onChange={(e) => setGst(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Discount/Savings</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={discount} 
+                            onChange={(e) => setDiscount(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-green-400 text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Cash Out</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={cashOut} 
+                            onChange={(e) => setCashOut(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Change Given</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+                          <input 
+                            type="number" 
+                            value={change} 
+                            onChange={(e) => setChange(e.target.value)} 
+                            placeholder="0.00" 
+                            className="w-full bg-slate-800 rounded-lg px-3 py-2 pl-7 text-white text-sm placeholder-slate-600" 
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-slate-500 text-xs mb-1 block">Payment Method</label>
+                        <select 
+                          value={paymentMethod} 
+                          onChange={(e) => setPaymentMethod(e.target.value)}
+                          className="w-full bg-slate-800 rounded-lg px-3 py-2 text-white text-sm"
+                        >
+                          <option value="">Unknown</option>
+                          <option value="Cash">Cash</option>
+                          <option value="EFTPOS">EFTPOS</option>
+                          <option value="Visa">Visa</option>
+                          <option value="Mastercard">Mastercard</option>
+                          <option value="Paywave">Paywave</option>
+                          <option value="Debit Card">Debit Card</option>
+                          <option value="Credit Card">Credit Card</option>
+                        </select>
+                      </div>
+                    </div>
+                    
+                    {cardLastFour && (
+                      <div className="text-center text-slate-500 text-xs">
+                        Card ending in •••• {cardLastFour}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
               <button onClick={handleSubmit} disabled={!amount || !category} className="w-full py-4 bg-gradient-to-r from-orange-600 to-red-600 rounded-xl font-bold text-lg disabled:opacity-50">{editing ? "Save" : "Add"}</button>
               {editing && (
                 <button onClick={handleDelete} className={`w-full py-3 mt-3 rounded-xl font-medium ${confirmDelete ? 'bg-red-600 text-white' : 'bg-slate-900 text-red-400'}`}>
