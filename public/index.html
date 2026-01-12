@@ -925,13 +925,27 @@ Respond with ONLY valid JSON:
         }));
       };
 
+      // Global API logger - saves to localStorage for debugging
+      const apiLog = (msg) => {
+        const timestamp = new Date().toLocaleTimeString();
+        const entry = '[' + timestamp + '] ' + msg;
+        console.log('[API] ' + msg);
+        try {
+          const existing = localStorage.getItem('scan_debug_log') || '';
+          localStorage.setItem('scan_debug_log', existing + '\n' + entry);
+        } catch (e) {}
+      };
+
       // Receipt scanning with server-side AI (key kept secret)
       const scanReceipt = async (imageData) => {
+        apiLog('=== scanReceipt called ===');
+        apiLog('Image data length: ' + (imageData?.length || 0) + ' chars');
         setScanning(true);
         setScanResult(null);
         
         try {
           // Step 1: Use OCR to extract text from receipt
+          apiLog('Step 1: Calling /api/ai with action=ocr');
           const ocrResponse = await fetch('/api/ai', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -941,12 +955,14 @@ Respond with ONLY valid JSON:
             })
           });
 
+          apiLog('OCR response status: ' + ocrResponse.status);
           let extractedText = '';
           let parsedData = null;
           
           if (ocrResponse.ok) {
             const ocrResult = await ocrResponse.json();
-            console.log('OCR result:', ocrResult);
+            apiLog('OCR result success: ' + ocrResult.success);
+            apiLog('OCR result data: ' + JSON.stringify(ocrResult).substring(0, 300));
             
             if (ocrResult.success && ocrResult.result) {
               const ocrData = ocrResult.result;
@@ -960,12 +976,19 @@ Respond with ONLY valid JSON:
               } else if (typeof ocrData === 'string') {
                 extractedText = ocrData;
               }
+            } else {
+              apiLog('OCR failed or no result: ' + JSON.stringify(ocrResult));
             }
+          } else {
+            const errorText = await ocrResponse.text();
+            apiLog('OCR request failed: ' + ocrResponse.status + ' - ' + errorText);
           }
 
-          console.log('Extracted text:', extractedText);
+          apiLog('Extracted text length: ' + extractedText.length);
+          apiLog('Extracted text preview: ' + extractedText.substring(0, 200));
 
           // Step 2: Use Mistral to parse the extracted text into structured data
+          apiLog('Step 2: Calling /api/ai with action=parse');
           const parsePrompt = `<s>[INST] You are parsing receipt text extracted via OCR. The text may have errors or formatting issues.
 
 OCR Text from receipt:
@@ -1006,18 +1029,25 @@ Respond with ONLY the JSON object.
             })
           });
 
+          apiLog('Parse response status: ' + parseResponse.status);
+
           if (parseResponse.ok) {
             const parseResult = await parseResponse.json();
+            apiLog('Parse result success: ' + parseResult.success);
+            
             if (parseResult.success && parseResult.result) {
               const parseText = parseResult.result[0]?.generated_text || '';
-              console.log('Parse result:', parseText);
+              apiLog('Parse text: ' + parseText.substring(0, 300));
               
               // Extract JSON from response
               const jsonMatch = parseText.match(/\{[\s\S]*?\}(?=\s*$|\s*\n|$)/);
               if (jsonMatch) {
+                apiLog('Found JSON match: ' + jsonMatch[0].substring(0, 200));
                 try {
                   parsedData = JSON.parse(jsonMatch[0]);
+                  apiLog('Parsed JSON successfully: total=' + parsedData.total + ', vendor=' + parsedData.vendor);
                 } catch (e) {
+                  apiLog('JSON parse error: ' + e.message + ', trying to fix...');
                   // Try to fix common JSON issues
                   let fixed = jsonMatch[0]
                     .replace(/,\s*}/g, '}')
@@ -1025,12 +1055,20 @@ Respond with ONLY the JSON object.
                     .replace(/(\w+):/g, '"$1":');
                   try {
                     parsedData = JSON.parse(fixed);
+                    apiLog('Fixed JSON parsed: total=' + parsedData.total);
                   } catch (e2) {
-                    console.error('JSON parse failed:', e2);
+                    apiLog('Fixed JSON also failed: ' + e2.message);
                   }
                 }
+              } else {
+                apiLog('No JSON match found in parse response');
               }
+            } else {
+              apiLog('Parse failed or no result: ' + JSON.stringify(parseResult));
             }
+          } else {
+            const errorText = await parseResponse.text();
+            apiLog('Parse request failed: ' + parseResponse.status + ' - ' + errorText);
           }
 
           // Build result object
@@ -1046,12 +1084,14 @@ Respond with ONLY the JSON object.
             scannedAt: new Date().toISOString()
           };
 
+          apiLog('Final result: total=' + result.total + ', vendor=' + result.vendor + ', category=' + result.category);
           setScanResult(result);
           setScanning(false);
           return result;
           
         } catch (e) {
-          console.error('Scan failed:', e);
+          apiLog('ERROR in scanReceipt: ' + e.message);
+          apiLog('Error stack: ' + e.stack);
           setScanning(false);
           
           // Return a basic result so user can still enter manually
@@ -2555,24 +2595,37 @@ Respond with ONLY the JSON object.
         
         // Manual AI scan function
         const runAIScan = async () => {
+          log('--- AI SCAN STARTED ---');
+          
           if (!pendingReceipt?.originalImage) {
-            log('No image to scan');
+            log('ERROR: No image to scan');
             return;
           }
           
-          log('Manual AI scan triggered');
+          log('Image size: ' + Math.round(pendingReceipt.originalImage.length / 1024) + 'KB');
           setScanningLocal(true);
           setScanStatus('Reading receipt...');
           
           try {
+            log('Calling scanReceipt...');
             const result = await scanReceipt(pendingReceipt.originalImage);
-            log('AI result: ' + JSON.stringify(result).substring(0, 200));
+            log('scanReceipt returned: ' + JSON.stringify(result).substring(0, 500));
             
             if (result && result.total) {
+              log('SUCCESS: total=' + result.total + ', vendor=' + result.vendor + ', category=' + result.category);
               setAmount(result.total.toString());
-              if (result.date) setDate(result.date);
-              if (result.category) setCategory(result.category);
-              if (result.vendor) setDescription(result.vendor);
+              if (result.date) {
+                log('Setting date: ' + result.date);
+                setDate(result.date);
+              }
+              if (result.category) {
+                log('Setting category: ' + result.category);
+                setCategory(result.category);
+              }
+              if (result.vendor) {
+                log('Setting description: ' + result.vendor);
+                setDescription(result.vendor);
+              }
               
               setPendingReceipt(prev => ({
                 ...prev,
@@ -2589,16 +2642,20 @@ Respond with ONLY the JSON object.
               // Clear localStorage on success
               localStorage.removeItem('pending_scan_image');
               localStorage.removeItem('pending_scan_time');
+              log('Cleared localStorage, form should be filled');
             } else {
+              log('WARN: No total in result. Full result: ' + JSON.stringify(result));
               setLastScanInfo({ error: true, message: 'Could not read receipt. Enter details manually.' });
             }
           } catch (err) {
-            log('AI error: ' + err.message);
+            log('ERROR in runAIScan: ' + err.message);
+            log('Error stack: ' + err.stack);
             setLastScanInfo({ error: true, message: 'AI error: ' + err.message });
           }
           
           setScanningLocal(false);
           setScanStatus('');
+          log('--- AI SCAN FINISHED ---');
           setTimeout(() => setLastScanInfo(null), 8000);
         };
         
@@ -2901,7 +2958,12 @@ Respond with ONLY the JSON object.
                       
                       {/* Floating Debug Button */}
                       <button 
-                        onClick={(e) => { e.preventDefault(); setShowDebugLog(true); }}
+                        onClick={(e) => { 
+                          e.preventDefault(); 
+                          // Refresh log from localStorage
+                          setDebugLog(localStorage.getItem('scan_debug_log') || '');
+                          setShowDebugLog(true); 
+                        }}
                         className="fixed bottom-24 right-4 w-12 h-12 bg-slate-800 rounded-full flex items-center justify-center text-xl border border-slate-700 z-50"
                       >
                         🐛
@@ -3087,6 +3149,51 @@ Respond with ONLY the JSON object.
                 <button onClick={handleDelete} className={`w-full py-3 mt-3 rounded-xl font-medium ${confirmDelete ? 'bg-red-600 text-white' : 'bg-slate-900 text-red-400'}`}>
                   {confirmDelete ? 'Tap again to confirm' : 'Delete'}
                 </button>
+              )}
+              
+              {/* Debug button in form view */}
+              <button 
+                onClick={(e) => { 
+                  e.preventDefault(); 
+                  setDebugLog(localStorage.getItem('scan_debug_log') || '');
+                  setShowDebugLog(true); 
+                }}
+                className="w-full py-2 mt-4 bg-slate-800 rounded-xl text-slate-500 text-sm flex items-center justify-center gap-2"
+              >
+                🐛 Debug Log
+              </button>
+              
+              {/* Debug Log Modal */}
+              {showDebugLog && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setShowDebugLog(false)}>
+                  <div className="absolute inset-0 bg-slate-950/90" />
+                  <div className="relative bg-slate-900 w-full max-w-md rounded-2xl p-4 border border-slate-700" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex justify-between items-center mb-3">
+                      <h3 className="text-white font-bold">🐛 Debug Log</h3>
+                      <button onClick={() => setShowDebugLog(false)} className="text-slate-400 text-xl">×</button>
+                    </div>
+                    <textarea 
+                      readOnly 
+                      value={debugLog || '(empty)'}
+                      className="w-full bg-slate-800 rounded-xl px-3 py-2 text-xs text-green-400 font-mono h-64"
+                      onClick={(e) => e.target.select()}
+                    />
+                    <div className="flex gap-2 mt-3">
+                      <button 
+                        onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(debugLog); }}
+                        className="flex-1 py-2 bg-cyan-600 rounded-lg text-sm font-medium"
+                      >
+                        📋 Copy
+                      </button>
+                      <button 
+                        onClick={(e) => { e.preventDefault(); clearLog(); }}
+                        className="flex-1 py-2 bg-slate-700 rounded-lg text-sm"
+                      >
+                        🗑️ Clear
+                      </button>
+                    </div>
+                  </div>
+                </div>
               )}
                 </>
               )}
