@@ -214,7 +214,7 @@
     ];
 
     // Family members who might pay out of pocket and need reimbursement
-    const FAMILY_MEMBERS = ['Martha', 'Samason', 'Kelynge', 'Nourah', 'Marco', 'Ben'];
+    const FAMILY_MEMBERS = ['Martha', 'Samson', 'Kelynge', 'Nourah', 'Marco', 'Ben'];
 
     // Gift/Koha categories
     const GIFT_CATEGORIES = [
@@ -2396,7 +2396,7 @@ Respond with ONLY valid JSON:
         const [confirmDelete, setConfirmDelete] = useState(false);
         // FIX: Initialize scanning state from sessionStorage to persist across remounts
         const [scanningLocal, setScanningLocal] = useState(() => sessionStorage.getItem('koha_scanning') === 'true');
-        const [scanProgress, setScanProgress] = useState(() => parseInt(sessionStorage.getItem('koha_scan_progress') || '0'));
+        const [scanProgress, setScanProgress] = useState(0);
         const [lastScanInfo, setLastScanInfo] = useState(null);
         const [pendingReceipt, setPendingReceipt] = useState(() => {
           if (editing && editingItem?.receipt) return editingItem.receipt;
@@ -2417,7 +2417,7 @@ Respond with ONLY valid JSON:
           if (editing) return true;
           return !!initSession?.image;
         });
-        const [scanStatus, setScanStatus] = useState(() => sessionStorage.getItem('koha_scan_status') || '');
+        const [scanStatus, setScanStatus] = useState('');
         const [debugLog, setDebugLog] = useState(() => localStorage.getItem('scan_debug_log') || '');
         const [showDebugLog, setShowDebugLog] = useState(false);
         const [showReceiptDetails, setShowReceiptDetails] = useState(() => {
@@ -2471,14 +2471,19 @@ Respond with ONLY valid JSON:
         
         const fileInputRef = useRef(null);
         
-        // FIX: Wrapper to set scanning state AND sessionStorage atomically (prevents race condition on iOS remount)
-        const setScanning = (value, progress = 0, status = '') => {
-          sessionStorage.setItem('koha_scanning', value ? 'true' : 'false');
-          sessionStorage.setItem('koha_scan_progress', progress.toString());
-          sessionStorage.setItem('koha_scan_status', status);
-          setScanningLocal(value);
-          setScanProgress(progress);
-          setScanStatus(status);
+        // FIX: Only persist scan START to sessionStorage (survives remounts)
+        // Use regular setState for progress updates (faster, no storage overhead)
+        const startScanning = () => {
+          sessionStorage.setItem('koha_scanning', 'true');
+          setScanningLocal(true);
+          setScanProgress(0);
+          setScanStatus('');
+        };
+        const stopScanning = () => {
+          sessionStorage.setItem('koha_scanning', 'false');
+          setScanningLocal(false);
+          setScanProgress(0);
+          setScanStatus('');
         };
         
         const log = (msg) => {
@@ -2629,20 +2634,24 @@ Respond with ONLY valid JSON:
             if (!file) { log('ERROR: No file'); return; }
             
             log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB)');
-            setScanning(true, 20, 'Reading photo...');
+            startScanning();
+            setScanProgress(20);
+            setScanStatus('Reading photo...');
             
             const reader = new FileReader();
             reader.onload = async () => {
               const base64 = reader.result.split(',')[1];
               log('Read file: ' + Math.round(base64.length/1024) + 'KB');
               
-              setScanning(true, 40, 'Compressing...');
+              setScanProgress(40);
+              setScanStatus('Compressing...');
               
               // FIX #2: Use improved compression
               const compressed = await compressForStorage(base64, 400);
               log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
               
-              setScanning(true, 60, 'Saving...');
+              setScanProgress(60);
+              setScanStatus('Saving...');
               
               // Save immediately with ScanSession
               ScanSession.save({ image: compressed, cameraOpenedAt: Date.now() });
@@ -2657,22 +2666,23 @@ Respond with ONLY valid JSON:
               });
               setPhotoTaken(true);
               
-              setScanning(true, 100, 'Photo ready!');
+              setScanProgress(100);
+              setScanStatus('Photo ready!');
               setLastScanInfo({ success: true, message: 'Photo captured! Tap "Autofill with AI" to scan.' });
               
-              setTimeout(() => { setScanning(false, 0, ''); }, 1000);
+              setTimeout(() => stopScanning(), 500);
               log('Photo saved to state, ready for AI scan');
             };
             
             reader.onerror = () => {
               log('FileReader error');
-              setScanning(false, 0, '');
+              stopScanning();
             };
             
             reader.readAsDataURL(file);
           } catch (error) {
             log('ERROR: ' + error.message);
-            setScanning(false, 0, '');
+            stopScanning();
           }
         };
         
@@ -2682,15 +2692,18 @@ Respond with ONLY valid JSON:
           if (!pendingReceipt?.originalImage) { log('ERROR: No image'); return; }
           
           log('Image size: ' + Math.round(pendingReceipt.originalImage.length / 1024) + 'KB');
-          setScanning(true, 0, 'Initializing...');
+          startScanning();
+          setScanProgress(0);
+          setScanStatus('Initializing...');
           
           try {
             const result = await scanReceipt(pendingReceipt.originalImage, (progress) => {
-              const status = progress < 30 ? 'Reading text...' : progress < 70 ? 'Processing...' : 'Analyzing...';
-              setScanning(true, progress, status);
+              setScanProgress(progress);
+              setScanStatus(progress < 30 ? 'Reading text...' : progress < 70 ? 'Processing...' : 'Analyzing...');
             });
             
-            setScanning(true, 100, 'Complete!');
+            setScanProgress(100);
+            setScanStatus('Complete!');
             
             if (result && result.total) {
               log('SUCCESS: total=' + result.total + ', vendor=' + result.vendor);
@@ -2717,7 +2730,7 @@ Respond with ONLY valid JSON:
             setLastScanInfo({ error: true, message: 'Scan failed: ' + err.message });
           }
           
-          setTimeout(() => setScanning(false, 0, ''), 1000);
+          setTimeout(() => stopScanning(), 500);
           setTimeout(() => setLastScanInfo(null), 8000);
         };
         
@@ -2729,14 +2742,17 @@ Respond with ONLY valid JSON:
             if (!file) { log('ERROR: No file'); return; }
             
             log('File: ' + file.name + ' (' + Math.round(file.size/1024) + 'KB)');
-            setScanning(true, 20, 'Reading photo...');
+            startScanning();
+            setScanProgress(20);
+            setScanStatus('Reading photo...');
             
             const reader = new FileReader();
             reader.onload = async () => {
               const base64 = reader.result.split(',')[1];
               log('Read file: ' + Math.round(base64.length/1024) + 'KB');
               
-              setScanning(true, 60, 'Compressing...');
+              setScanProgress(60);
+              setScanStatus('Compressing...');
               const compressed = await compressForStorage(base64, 400);
               log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
               
@@ -2749,23 +2765,24 @@ Respond with ONLY valid JSON:
               });
               setPhotoTaken(true);
               
-              setScanning(true, 100, 'Photo added!');
+              setScanProgress(100);
+              setScanStatus('Photo added!');
               setLastScanInfo({ success: true, message: 'Receipt photo attached!' });
               
-              setTimeout(() => setScanning(false, 0, ''), 800);
+              setTimeout(() => stopScanning(), 500);
               setTimeout(() => setLastScanInfo(null), 5000);
               log('Receipt photo attached');
             };
             
             reader.onerror = () => {
               log('FileReader error');
-              setScanning(false, 0, '');
+              stopScanning();
             };
             
             reader.readAsDataURL(file);
           } catch (error) {
             log('ERROR: ' + error.message);
-            setScanning(false, 0, '');
+            stopScanning();
           }
         };
         
