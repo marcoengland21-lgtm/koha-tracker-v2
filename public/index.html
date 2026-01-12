@@ -2522,9 +2522,70 @@ Respond with ONLY the JSON object.
           setDebugLog('');
         };
         
-        // Log on mount
+        // Log on mount and check for pending scan to recover
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing + ', photoTaken=' + photoTaken);
+          
+          // Check if we have a pending scan from before a page reload
+          const pendingImage = localStorage.getItem('pending_scan_image');
+          const pendingTime = localStorage.getItem('pending_scan_time');
+          
+          if (pendingImage && pendingTime && !editing) {
+            const age = Date.now() - new Date(pendingTime).getTime();
+            log('Found pending scan from ' + Math.round(age/1000) + 's ago');
+            
+            // Only recover if less than 2 minutes old
+            if (age < 120000) {
+              log('Recovering pending scan...');
+              setPendingReceipt({
+                originalImage: pendingImage,
+                scannedAt: pendingTime,
+                vendor: '',
+                total: 0
+              });
+              setPhotoTaken(true);
+              setScanningLocal(true);
+              setScanStatus('Recovering scan...');
+              
+              // Process with AI
+              scanReceipt(pendingImage).then(result => {
+                log('Recovery AI result: ' + JSON.stringify(result).substring(0, 200));
+                if (result && result.total) {
+                  setAmount(result.total.toString());
+                  if (result.date) setDate(result.date);
+                  if (result.category) setCategory(result.category);
+                  if (result.vendor) setDescription(result.vendor);
+                  setPendingReceipt({
+                    originalImage: pendingImage,
+                    vendor: result.vendor,
+                    items: result.items,
+                    total: result.total,
+                    date: result.date,
+                    time: result.time,
+                    rawText: result.rawText,
+                    scannedAt: pendingTime
+                  });
+                  setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
+                } else {
+                  setLastScanInfo({ error: true, message: 'Could not read receipt. Enter manually.' });
+                }
+                setScanningLocal(false);
+                setScanStatus('');
+                localStorage.removeItem('pending_scan_image');
+                localStorage.removeItem('pending_scan_time');
+                setTimeout(() => setLastScanInfo(null), 8000);
+              }).catch(err => {
+                log('Recovery AI error: ' + err.message);
+                setScanningLocal(false);
+                setScanStatus('');
+                setLastScanInfo({ error: true, message: 'AI error. Enter manually.' });
+              });
+            } else {
+              log('Pending scan too old, clearing');
+              localStorage.removeItem('pending_scan_image');
+              localStorage.removeItem('pending_scan_time');
+            }
+          }
         }, []);
         
         // Get receipt (from pending scan or existing expense)
@@ -2711,17 +2772,27 @@ Respond with ONLY the JSON object.
               log('FileReader onload fired');
               try {
                 const base64 = reader.result.split(',')[1];
-                log('Base64 length: ' + base64.length + ' chars');
+                log('Base64 length: ' + base64.length + ' chars (' + Math.round(base64.length/1024) + 'KB)');
                 
-                setScanStatus('Compressing...');
-                log('Starting compression...');
-                const compressed = await compressImage(base64, 1200, 0.8);
-                log('Compressed to: ' + Math.round(compressed.length/1024) + 'KB');
+                // Save to localStorage IMMEDIATELY so it survives page reload
+                log('Saving to localStorage...');
+                try {
+                  localStorage.setItem('pending_scan_image', base64);
+                  localStorage.setItem('pending_scan_time', new Date().toISOString());
+                  log('Saved to localStorage OK');
+                } catch (storageErr) {
+                  log('localStorage save failed (image too big?): ' + storageErr.message);
+                }
                 
-                // Save the image first regardless of AI result
-                log('Saving pending receipt...');
+                // Set photoTaken IMMEDIATELY to switch screens
+                log('Setting photoTaken=true NOW');
+                setPhotoTaken(true);
+                setScanningLocal(true);
+                
+                // Save the image to state
+                log('Saving pending receipt to state...');
                 setPendingReceipt({
-                  originalImage: compressed,
+                  originalImage: base64,
                   scannedAt: new Date().toISOString(),
                   vendor: '',
                   total: 0
@@ -2731,7 +2802,7 @@ Respond with ONLY the JSON object.
                 log('Calling scanReceipt API...');
                 
                 try {
-                  const result = await scanReceipt(compressed);
+                  const result = await scanReceipt(base64);
                   log('AI result: ' + JSON.stringify(result).substring(0, 200));
                   
                   if (result && result.total) {
@@ -2742,7 +2813,7 @@ Respond with ONLY the JSON object.
                     if (result.vendor) setDescription(result.vendor);
                     
                     setPendingReceipt({
-                      originalImage: compressed,
+                      originalImage: base64,
                       vendor: result.vendor,
                       items: result.items,
                       total: result.total,
@@ -2757,13 +2828,16 @@ Respond with ONLY the JSON object.
                     log('WARN: AI returned no total');
                     setLastScanInfo({ error: true, message: 'AI could not read receipt. Enter details manually.' });
                   }
+                  
+                  // Clear localStorage after success
+                  localStorage.removeItem('pending_scan_image');
+                  localStorage.removeItem('pending_scan_time');
+                  
                 } catch (aiError) {
                   log('ERROR: AI call failed: ' + aiError.message);
                   setLastScanInfo({ error: true, message: 'AI unavailable. Enter details manually.' });
                 }
                 
-                log('Setting photoTaken=true, scanningLocal=false');
-                setPhotoTaken(true);
                 setScanningLocal(false);
                 setScanStatus('');
                 log('--- SCAN COMPLETE ---');
