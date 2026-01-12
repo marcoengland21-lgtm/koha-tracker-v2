@@ -32,6 +32,7 @@
     .fade-in { animation: fadeIn 0.2s ease-out; }
     @keyframes progressBar { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
     @keyframes scan { 0% { top: 0; } 50% { top: 100%; } 100% { top: 0; } }
+    @keyframes loading { 0% { width: 20%; } 50% { width: 80%; } 100% { width: 20%; } }
     .progress-animated { 
       background: linear-gradient(90deg, #06b6d4, #8b5cf6, #ec4899, #06b6d4);
       background-size: 300% 100%;
@@ -2496,15 +2497,10 @@ Respond with ONLY the JSON object.
         const [lastScanInfo, setLastScanInfo] = useState(null);
         const [pendingReceipt, setPendingReceipt] = useState(null);
         const [showReceipt, setShowReceipt] = useState(false);
-        const [showOriginalImage, setShowOriginalImage] = useState(false);
-        const [photoTaken, setPhotoTaken] = useState(editing ? true : false); // New: track if photo taken
-        const [showCamera, setShowCamera] = useState(false);
-        const [cameraError, setCameraError] = useState(null);
+        const [photoTaken, setPhotoTaken] = useState(editing ? true : false);
         const [scanStatus, setScanStatus] = useState('');
         const fileInputRef = useRef(null);
-        const videoRef = useRef(null);
         const canvasRef = useRef(null);
-        const streamRef = useRef(null);
         
         // Get receipt (from pending scan or existing expense)
         const currentReceipt = pendingReceipt || (editing && editingItem?.receipt) || null;
@@ -2536,111 +2532,9 @@ Respond with ONLY the JSON object.
           });
         };
 
-        // Start camera
-        const startCamera = async () => {
-          setCameraError(null);
-          setScanStatus('');
-          
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: 'environment' }
-            });
-            streamRef.current = stream;
-            setShowCamera(true);
-            
-            // Small delay to ensure video element is mounted
-            setTimeout(() => {
-              if (videoRef.current && streamRef.current) {
-                videoRef.current.srcObject = streamRef.current;
-              }
-            }, 100);
-          } catch (err) {
-            console.error('Camera error:', err);
-            setCameraError('Could not access camera. Please use upload instead.');
-          }
-        };
-
-        // Stop camera
-        const stopCamera = () => {
-          if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
-          }
-          setShowCamera(false);
-          setScanStatus('');
-        };
-
-        // Capture photo
-        const capturePhoto = async () => {
-          if (!videoRef.current || !canvasRef.current) return;
-          
-          setScanStatus('capturing');
-          
-          const video = videoRef.current;
-          const canvas = canvasRef.current;
-          canvas.width = video.videoWidth || 1280;
-          canvas.height = video.videoHeight || 720;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(video, 0, 0);
-          
-          const base64 = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
-          
-          // Stop camera first
-          if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
-          }
-          setShowCamera(false);
-          
-          // Now process
-          setScanningLocal(true);
-          setScanStatus('reading');
-          
-          const compressed = await compressImage(base64, 1200, 0.8);
-          const result = await scanReceipt(compressed);
-          
-          if (result && result.total) {
-            setAmount(result.total.toString());
-            if (result.date) setDate(result.date);
-            if (result.category) setCategory(result.category);
-            if (result.vendor) setDescription(result.vendor);
-            
-            setPendingReceipt({
-              originalImage: compressed,
-              vendor: result.vendor,
-              items: result.items,
-              total: result.total,
-              date: result.date,
-              time: result.time,
-              rawText: result.rawText,
-              scannedAt: new Date().toISOString()
-            });
-            
-            setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
-            setShowReceipt(true);
-          } else {
-            setPendingReceipt({
-              originalImage: compressed,
-              scannedAt: new Date().toISOString(),
-              vendor: '',
-              total: 0
-            });
-            setLastScanInfo({ error: true, message: 'Could not read receipt. Enter details manually.' });
-          }
-          
-          setPhotoTaken(true);
-          setScanningLocal(false);
-          setScanStatus('');
-          setTimeout(() => setLastScanInfo(null), 8000);
-        };
-
-        // Cleanup camera on unmount
+        // Cleanup on unmount
         useEffect(() => {
-          return () => {
-            if (streamRef.current) {
-              streamRef.current.getTracks().forEach(track => track.stop());
-            }
-          };
+          return () => {};
         }, []);
 
         // Receipt Viewer Component
@@ -2761,58 +2655,98 @@ Respond with ONLY the JSON object.
         };
 
         const handleScan = async (e) => {
-          const file = e.target.files?.[0];
-          if (!file) return;
-          setScanningLocal(true);
-          setScanStatus('Loading...');
-          setLastScanInfo(null);
-          
-          const reader = new FileReader();
-          reader.onload = async () => {
-            const base64 = reader.result.split(',')[1];
-            
-            setScanStatus('Compressing...');
-            const compressed = await compressImage(base64, 1200, 0.8);
-            console.log(`Compressed: ${Math.round(base64.length / 1024)}KB -> ${Math.round(compressed.length / 1024)}KB`);
-            
-            setScanStatus('Reading receipt...');
-            const result = await scanReceipt(compressed);
-            
-            if (result && result.total) {
-              setAmount(result.total.toString());
-              if (result.date) setDate(result.date);
-              if (result.category) setCategory(result.category);
-              if (result.vendor) setDescription(result.vendor);
-              
-              setPendingReceipt({
-                originalImage: compressed,
-                vendor: result.vendor,
-                items: result.items,
-                total: result.total,
-                date: result.date,
-                time: result.time,
-                rawText: result.rawText,
-                scannedAt: new Date().toISOString()
-              });
-              
-              setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
-              setShowReceipt(true); // Show the result popup
-            } else {
-              setPendingReceipt({
-                originalImage: compressed,
-                scannedAt: new Date().toISOString(),
-                vendor: '',
-                total: 0
-              });
-              setLastScanInfo({ error: true, message: 'Could not read receipt. Enter details manually.' });
+          try {
+            const file = e.target.files?.[0];
+            if (!file) {
+              console.log('No file selected');
+              return;
             }
             
-            setPhotoTaken(true);
+            console.log('File selected:', file.name, file.size);
+            setScanningLocal(true);
+            setScanStatus('Loading image...');
+            setLastScanInfo(null);
+            
+            const reader = new FileReader();
+            reader.onerror = (error) => {
+              console.error('FileReader error:', error);
+              setScanningLocal(false);
+              setScanStatus('');
+              setPhotoTaken(true); // Still let them enter manually
+              alert('Error reading image. Please try again or enter details manually.');
+            };
+            
+            reader.onload = async () => {
+              try {
+                console.log('File loaded, processing...');
+                const base64 = reader.result.split(',')[1];
+                
+                setScanStatus('Compressing...');
+                const compressed = await compressImage(base64, 1200, 0.8);
+                console.log('Compressed:', Math.round(compressed.length / 1024) + 'KB');
+                
+                // Save the image first regardless of AI result
+                setPendingReceipt({
+                  originalImage: compressed,
+                  scannedAt: new Date().toISOString(),
+                  vendor: '',
+                  total: 0
+                });
+                
+                setScanStatus('Reading with AI...');
+                
+                try {
+                  const result = await scanReceipt(compressed);
+                  console.log('AI result:', result);
+                  
+                  if (result && result.total) {
+                    setAmount(result.total.toString());
+                    if (result.date) setDate(result.date);
+                    if (result.category) setCategory(result.category);
+                    if (result.vendor) setDescription(result.vendor);
+                    
+                    setPendingReceipt({
+                      originalImage: compressed,
+                      vendor: result.vendor,
+                      items: result.items,
+                      total: result.total,
+                      date: result.date,
+                      time: result.time,
+                      rawText: result.rawText,
+                      scannedAt: new Date().toISOString()
+                    });
+                    
+                    setLastScanInfo({ vendor: result.vendor, total: result.total, success: true });
+                  } else {
+                    setLastScanInfo({ error: true, message: 'AI could not read receipt. Enter details manually.' });
+                  }
+                } catch (aiError) {
+                  console.error('AI error:', aiError);
+                  setLastScanInfo({ error: true, message: 'AI unavailable. Enter details manually.' });
+                }
+                
+                setPhotoTaken(true);
+                setScanningLocal(false);
+                setScanStatus('');
+                setTimeout(() => setLastScanInfo(null), 8000);
+                
+              } catch (processError) {
+                console.error('Processing error:', processError);
+                setScanningLocal(false);
+                setScanStatus('');
+                setPhotoTaken(true);
+                alert('Error processing image. Please enter details manually.');
+              }
+            };
+            
+            reader.readAsDataURL(file);
+            
+          } catch (error) {
+            console.error('handleScan error:', error);
             setScanningLocal(false);
             setScanStatus('');
-            setTimeout(() => setLastScanInfo(null), 8000);
-          };
-          reader.readAsDataURL(file);
+            alert('Something went wrong. Please try again.');
+          }
         };
 
         const handleSubmit = () => {
@@ -2851,119 +2785,75 @@ Respond with ONLY the JSON object.
               
               {/* Show photo prompt for new expenses without photo */}
               {!editing && !photoTaken ? (
-                <div className="fixed inset-0 bg-slate-950 z-40 flex flex-col">
-                  <input ref={fileInputRef} type="file" accept="image/*" onChange={handleScan} className="hidden" />
-                  <canvas ref={canvasRef} className="hidden" />
+                <div className="min-h-[70vh] flex flex-col items-center justify-center px-6">
+                  {/* Single file input that can do both camera and gallery */}
+                  <input 
+                    ref={fileInputRef} 
+                    type="file" 
+                    accept="image/*" 
+                    capture="environment"
+                    onChange={handleScan} 
+                    className="hidden" 
+                    key="camera-input"
+                  />
+                  <input 
+                    id="galleryInput"
+                    type="file" 
+                    accept="image/*"
+                    onChange={handleScan} 
+                    className="hidden" 
+                    key="gallery-input"
+                  />
                   
-                  {/* Header */}
-                  <div className="flex items-center justify-between p-4 pt-8">
-                    <button 
-                      onClick={() => { stopCamera(); setScreen('home'); }} 
-                      className="text-white text-lg px-3 py-1"
-                    >
-                      ✕
-                    </button>
-                    <h1 className="text-white font-bold">Scan Receipt</h1>
-                    <div className="w-10"></div>
-                  </div>
-                  
-                  {/* Camera View */}
-                  {showCamera ? (
-                    <div className="flex-1 flex flex-col">
-                      <div className="flex-1 relative bg-black">
-                        <video 
-                          ref={videoRef} 
-                          autoPlay 
-                          playsInline
-                          muted
-                          className="w-full h-full object-cover"
-                        />
-                        
-                        {/* Viewfinder overlay */}
-                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                          <div className="w-[80%] h-[50%] border-2 border-white/60 rounded-xl">
-                            <div className="absolute -top-1 -left-1 w-6 h-6 border-t-2 border-l-2 border-white rounded-tl-lg"></div>
-                            <div className="absolute -top-1 -right-1 w-6 h-6 border-t-2 border-r-2 border-white rounded-tr-lg"></div>
-                            <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-2 border-l-2 border-white rounded-bl-lg"></div>
-                            <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-2 border-r-2 border-white rounded-br-lg"></div>
-                          </div>
-                        </div>
-                        
-                        {/* Instructions */}
-                        <div className="absolute top-4 left-0 right-0 flex justify-center">
-                          <div className="bg-black/60 px-4 py-2 rounded-full text-white text-sm">
-                            Position receipt in frame
-                          </div>
-                        </div>
+                  {scanningLocal ? (
+                    /* Processing state - shows while reading */
+                    <div className="text-center w-full max-w-sm">
+                      <div className="w-24 h-24 mx-auto mb-6 rounded-2xl bg-green-500/20 flex items-center justify-center animate-pulse">
+                        <span className="text-5xl">🔍</span>
                       </div>
-                      
-                      {/* Bottom controls */}
-                      <div className="bg-slate-950 p-6 pb-10">
-                        <div className="flex items-center justify-center gap-6">
-                          <button 
-                            onClick={stopCamera}
-                            className="px-6 py-3 bg-slate-800 rounded-xl text-slate-300"
-                          >
-                            Cancel
-                          </button>
-                          <button 
-                            onClick={capturePhoto}
-                            className="px-8 py-4 bg-white rounded-full"
-                          >
-                            <div className="w-12 h-12 bg-white border-4 border-slate-900 rounded-full"></div>
-                          </button>
-                          <button 
-                            onClick={() => { stopCamera(); fileInputRef.current?.click(); }}
-                            className="px-4 py-3 bg-slate-800 rounded-xl text-xl"
-                          >
-                            🖼️
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : scanningLocal ? (
-                    /* Processing uploaded image */
-                    <div className="flex-1 flex flex-col items-center justify-center p-8">
-                      <div className="w-24 h-24 rounded-full bg-green-600/20 flex items-center justify-center mb-6">
-                        <div className="text-5xl animate-pulse">🔍</div>
-                      </div>
-                      <h2 className="text-xl font-bold text-white mb-2">Reading Receipt</h2>
-                      <p className="text-slate-400 text-center">{scanStatus || 'Processing...'}</p>
-                      <div className="mt-6 w-48 h-2 bg-slate-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-green-500 to-emerald-500 animate-pulse" style={{width: '70%'}}></div>
+                      <h2 className="text-2xl font-bold text-white mb-3">Processing...</h2>
+                      <p className="text-green-400 text-lg mb-2">{scanStatus || 'Please wait'}</p>
+                      <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                        <div className="h-full bg-green-500 rounded-full animate-[loading_1s_ease-in-out_infinite]" style={{width: '70%'}}></div>
                       </div>
                     </div>
                   ) : (
-                    /* Initial state - no camera yet */
-                    <div className="flex-1 flex flex-col items-center justify-center p-8">
-                      <div className="text-7xl mb-6">📷</div>
-                      <h2 className="text-2xl font-bold text-white mb-2">Add Receipt</h2>
+                    /* Initial choice - camera or gallery */
+                    <>
+                      <div className="w-24 h-24 mb-6 rounded-2xl bg-purple-500/20 flex items-center justify-center">
+                        <span className="text-5xl">🧾</span>
+                      </div>
+                      <h1 className="text-2xl font-bold text-white mb-2">Add Receipt</h1>
                       <p className="text-slate-400 text-center mb-8">
-                        Take a photo or upload from gallery
+                        Snap a photo and AI will read it
                       </p>
                       
-                      {cameraError && (
-                        <div className="bg-red-900/30 border border-red-700/50 rounded-xl p-4 mb-6 max-w-xs">
-                          <p className="text-red-300 text-sm text-center">{cameraError}</p>
-                        </div>
-                      )}
-                      
-                      <div className="flex flex-col gap-3 w-full max-w-xs">
+                      <div className="w-full max-w-xs space-y-3">
                         <button 
-                          onClick={startCamera}
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); fileInputRef.current?.click(); }}
                           className="w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl text-lg font-bold flex items-center justify-center gap-3"
                         >
-                          📸 Open Camera
+                          📸 Take Photo
                         </button>
                         
                         <button 
-                          onClick={() => fileInputRef.current?.click()}
-                          className="w-full py-4 bg-slate-800 rounded-2xl text-lg font-medium flex items-center justify-center gap-3 text-slate-300"
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); document.getElementById('galleryInput')?.click(); }}
+                          className="w-full py-4 bg-slate-800 rounded-2xl text-lg font-medium text-slate-300 flex items-center justify-center gap-3"
                         >
-                          🖼️ Upload from Gallery
+                          🖼️ Choose from Photos
+                        </button>
+                        
+                        <button 
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); setPhotoTaken(true); }}
+                          className="w-full py-3 text-slate-500 text-sm mt-4"
+                        >
+                          Skip - enter manually
                         </button>
                       </div>
-                    </div>
+                    </>
                   )}
                 </div>
               ) : (
