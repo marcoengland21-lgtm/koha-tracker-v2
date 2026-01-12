@@ -2396,22 +2396,23 @@ Respond with ONLY valid JSON:
         const setRecoveryFlag = () => sessionStorage.setItem('koha_has_recovered', 'true');
         const clearRecoveryFlag = () => sessionStorage.removeItem('koha_has_recovered');
         
-        // FIX #3: Recovery on mount using ScanSession (with debounce via sessionStorage)
+        // FIX #3: Recovery on mount using ScanSession
+        // ALWAYS load data from storage, but only show "Recovered!" message once
         useEffect(() => {
           log('AddExpense mounted, editing=' + editing);
           if (editing) return;
           
-          // CRITICAL: Skip if we've already recovered (persists across remounts!)
-          if (getRecoveryFlag()) {
-            log('Skipping recovery - already recovered (sessionStorage flag set)');
-            return;
-          }
+          const alreadyRecovered = getRecoveryFlag();
           
-          // Check for ScanSession first (new unified storage)
+          // Check for ScanSession - ALWAYS load data, but only show message if first time
           const session = ScanSession.get();
           if (session && session.image) {
-            setRecoveryFlag(); // Mark as recovered BEFORE state updates - persists across remounts!
-            log('Recovering from ScanSession, age=' + Math.round((Date.now() - session.savedAt) / 1000) + 's');
+            if (alreadyRecovered) {
+              log('Reloading data from ScanSession (silent - already showed message)');
+            } else {
+              log('Recovering from ScanSession, age=' + Math.round((Date.now() - session.savedAt) / 1000) + 's');
+              setRecoveryFlag(); // Only set flag on first recovery
+            }
             
             setPendingReceipt({
               originalImage: session.image,
@@ -2437,37 +2438,42 @@ Respond with ONLY valid JSON:
               setMethod(session.paymentMethod === 'Cash' ? 'cash' : 'bank');
             }
             
-            if (session.total) {
-              setLastScanInfo({ success: true, message: 'Recovered! Review and save.' });
-            } else {
-              setLastScanInfo({ success: true, message: 'Photo recovered! Tap "Autofill with AI" to scan.' });
+            // Only show message on first recovery
+            if (!alreadyRecovered) {
+              if (session.total) {
+                setLastScanInfo({ success: true, message: 'Recovered! Review and save.' });
+              } else {
+                setLastScanInfo({ success: true, message: 'Photo recovered! Tap "Autofill with AI" to scan.' });
+              }
             }
             
             if (session.subtotal || session.gst || session.paymentMethod) setShowReceiptDetails(true);
             return;
           }
           
-          // Fallback: check old keys
-          const pendingResult = localStorage.getItem('pending_scan_result') || sessionStorage.getItem('pending_scan_result');
-          if (pendingResult) {
-            try {
-              const result = JSON.parse(pendingResult);
-              if (Date.now() - (result.savedAt || 0) < 60000) {
-                setRecoveryFlag(); // Mark as recovered
-                log('Recovering from old pending_scan_result');
-                if (result.total) setAmount(result.total.toString());
-                if (result.vendor) setDescription(result.vendor);
-                if (result.category) setCategory(result.category);
-                if (result.originalImage) {
-                  setPendingReceipt({ originalImage: result.originalImage, ...result });
-                  setPhotoTaken(true);
+          // Fallback: check old keys (only if not already recovered)
+          if (!alreadyRecovered) {
+            const pendingResult = localStorage.getItem('pending_scan_result') || sessionStorage.getItem('pending_scan_result');
+            if (pendingResult) {
+              try {
+                const result = JSON.parse(pendingResult);
+                if (Date.now() - (result.savedAt || 0) < 60000) {
+                  setRecoveryFlag(); // Mark as recovered
+                  log('Recovering from old pending_scan_result');
+                  if (result.total) setAmount(result.total.toString());
+                  if (result.vendor) setDescription(result.vendor);
+                  if (result.category) setCategory(result.category);
+                  if (result.originalImage) {
+                    setPendingReceipt({ originalImage: result.originalImage, ...result });
+                    setPhotoTaken(true);
+                  }
+                  setLastScanInfo({ success: true, message: 'Recovered! Review and save.' });
                 }
-                setLastScanInfo({ success: true, message: 'Recovered! Review and save.' });
-              }
-            } catch (e) { log('Error parsing old result: ' + e.message); }
-            // Clear old keys
-            localStorage.removeItem('pending_scan_result');
-            sessionStorage.removeItem('pending_scan_result');
+              } catch (e) { log('Error parsing old result: ' + e.message); }
+              // Clear old keys
+              localStorage.removeItem('pending_scan_result');
+              sessionStorage.removeItem('pending_scan_result');
+            }
           }
         }, [editing]);
 
