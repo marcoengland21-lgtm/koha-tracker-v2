@@ -1,5 +1,6 @@
 // Netlify Function for AI calls
-// HF_TOKEN is stored as environment variable, never in code
+// Uses HuggingFace Inference Providers (new API as of 2025)
+// HF_TOKEN is stored as environment variable
 
 export default async (req) => {
   // Handle CORS
@@ -37,128 +38,183 @@ export default async (req) => {
       });
     }
 
-    // OCR: Extract text from receipt image
-    if (action === "ocr") {
-      // Convert base64 to binary
-      const binaryString = atob(data.image);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      
-      console.log('OCR image size:', bytes.length, 'bytes');
-      
-      // Try multiple OCR models in order of preference
-      const ocrModels = [
-        'microsoft/trocr-large-printed',
-        'microsoft/trocr-base-printed', 
-        'naver-clova-ix/donut-base-finetuned-cord-v2'
-      ];
-      
-      let ocrData = null;
-      let lastError = null;
-      
-      for (const model of ocrModels) {
-        console.log('Trying OCR model:', model);
+    // Combined OCR + Parse: Use a Vision Language Model to read the receipt
+    if (action === "ocr" || action === "parse") {
+      // For OCR action, we use VLM to read the receipt image directly
+      if (action === "ocr" && data.image) {
+        console.log('Using VLM to read receipt image...');
         
-        try {
-          const ocrResponse = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${HF_TOKEN}`,
-              'Content-Type': 'image/jpeg'
-            },
-            body: bytes
-          });
+        const prompt = `You are a receipt scanner. Look at this receipt image and extract the information.
 
-          console.log('OCR response status:', ocrResponse.status);
+Respond with ONLY a JSON object (no other text, no markdown):
+{
+  "total": <number - the final total amount paid, look for "TOTAL", "EFTPOS", "PAID", or the largest amount>,
+  "vendor": "<store/business name>",
+  "date": "<YYYY-MM-DD format if visible, otherwise null>",
+  "time": "<HH:MM format if visible, otherwise null>",
+  "items": [{"name": "<item name>", "price": <number>}],
+  "category": "<one of: kai, catering, drinks, petrol, flowers, clothing, printing, misc>",
+  "rawText": "<key text you can read from the receipt>"
+}
 
-          if (ocrResponse.ok) {
-            ocrData = await ocrResponse.json();
-            console.log('OCR success with', model, ':', JSON.stringify(ocrData).substring(0, 200));
-            break;
-          } else {
-            lastError = await ocrResponse.text();
-            console.log('OCR failed with', model, ':', lastError);
-          }
-        } catch (e) {
-          lastError = e.message;
-          console.log('OCR exception with', model, ':', e.message);
-        }
-      }
-      
-      if (ocrData) {
-        return new Response(JSON.stringify({ success: true, result: ocrData }), {
-          status: 200,
-          headers: corsHeaders,
-        });
-      } else {
-        return new Response(JSON.stringify({ error: "OCR failed", details: lastError }), {
-          status: 500,
-          headers: corsHeaders,
-        });
-      }
-    }
+Category guide:
+- kai = supermarkets (Countdown, Pak n Save, New World, Fresh Choice, Woolworths)
+- catering = restaurants/takeaway (KFC, McDonalds, Subway, cafes, bakeries)
+- drinks = liquor stores (Super Liquor, Liquorland, bottle stores)
+- petrol = fuel stations (Z, BP, Mobil, Gull, Caltex)
+- flowers = florists
+- clothing = clothes stores (Kmart, Farmers, The Warehouse)
+- printing = print/office (Warehouse Stationery, OfficeMax)
+- misc = anything else
 
-    // Parse: Use text generation to extract structured data
-    if (action === "parse" || action === "validate") {
-      // Try multiple text models
-      const textModels = [
-        'HuggingFaceH4/zephyr-7b-beta',
-        'mistralai/Mistral-7B-Instruct-v0.2',
-        'google/flan-t5-large',
-        'facebook/bart-large-cnn'
-      ];
-      
-      let parseData = null;
-      let lastError = null;
-      
-      for (const model of textModels) {
-        console.log('Trying text model:', model);
+Return ONLY the JSON object.`;
+
+        // Try multiple vision models
+        const visionModels = [
+          "meta-llama/Llama-3.2-11B-Vision-Instruct",
+          "Qwen/Qwen2-VL-7B-Instruct", 
+          "microsoft/Phi-3.5-vision-instruct"
+        ];
         
-        try {
-          const parseResponse = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${HF_TOKEN}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              inputs: data.prompt,
-              parameters: { 
-                max_new_tokens: data.maxTokens || 500, 
-                temperature: 0.1,
-                return_full_text: false
+        let result = null;
+        let lastError = null;
+        
+        for (const model of visionModels) {
+          console.log('Trying vision model:', model);
+          
+          try {
+            const response = await fetch('https://router.huggingface.co/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${HF_TOKEN}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                model: model,
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      {
+                        type: "image_url",
+                        image_url: {
+                          url: `data:image/jpeg;base64,${data.image}`
+                        }
+                      },
+                      {
+                        type: "text",
+                        text: prompt
+                      }
+                    ]
+                  }
+                ],
+                max_tokens: 1000,
+                temperature: 0.1
+              })
+            });
+
+            console.log('Response status:', response.status);
+
+            if (response.ok) {
+              const json = await response.json();
+              console.log('VLM response:', JSON.stringify(json).substring(0, 300));
+              
+              if (json.choices && json.choices[0]?.message?.content) {
+                const content = json.choices[0].message.content;
+                
+                // Try to parse JSON from response
+                const jsonMatch = content.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  try {
+                    result = JSON.parse(jsonMatch[0]);
+                    console.log('Parsed result:', result);
+                    break; // Success!
+                  } catch (e) {
+                    console.log('JSON parse error:', e.message);
+                    lastError = 'Could not parse JSON from response';
+                  }
+                } else {
+                  lastError = 'No JSON found in response';
+                }
               }
-            })
-          });
-
-          console.log('Parse response status:', parseResponse.status);
-
-          if (parseResponse.ok) {
-            parseData = await parseResponse.json();
-            console.log('Parse success with', model, ':', JSON.stringify(parseData).substring(0, 200));
-            break;
-          } else {
-            lastError = await parseResponse.text();
-            console.log('Parse failed with', model, ':', lastError);
+            } else {
+              lastError = await response.text();
+              console.log('Model failed:', model, lastError.substring(0, 200));
+            }
+          } catch (e) {
+            lastError = e.message;
+            console.log('Exception with model:', model, e.message);
           }
-        } catch (e) {
-          lastError = e.message;
-          console.log('Parse exception with', model, ':', e.message);
+        }
+        
+        if (result) {
+          return new Response(JSON.stringify({ success: true, result: result }), {
+            status: 200,
+            headers: corsHeaders,
+          });
+        } else {
+          return new Response(JSON.stringify({ error: "OCR failed", details: lastError }), {
+            status: 500,
+            headers: corsHeaders,
+          });
         }
       }
       
-      if (parseData) {
-        return new Response(JSON.stringify({ success: true, result: parseData }), {
-          status: 200,
-          headers: corsHeaders,
-        });
-      } else {
-        return new Response(JSON.stringify({ error: "Parse failed", details: lastError }), {
-          status: 500,
-          headers: corsHeaders,
-        });
+      // For text-only parse requests (fallback)
+      if (action === "parse" && data.prompt) {
+        console.log('Text-only parse request');
+        
+        const textModels = [
+          "meta-llama/Llama-3.1-8B-Instruct",
+          "mistralai/Mistral-7B-Instruct-v0.3"
+        ];
+        
+        let result = null;
+        let lastError = null;
+        
+        for (const model of textModels) {
+          try {
+            const response = await fetch('https://router.huggingface.co/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${HF_TOKEN}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                model: model,
+                messages: [
+                  { role: "user", content: data.prompt }
+                ],
+                max_tokens: 500,
+                temperature: 0.1
+              })
+            });
+
+            if (response.ok) {
+              const json = await response.json();
+              if (json.choices && json.choices[0]?.message?.content) {
+                result = [{ generated_text: json.choices[0].message.content }];
+                break;
+              }
+            } else {
+              lastError = await response.text();
+            }
+          } catch (e) {
+            lastError = e.message;
+          }
+        }
+        
+        if (result) {
+          return new Response(JSON.stringify({ success: true, result: result }), {
+            status: 200,
+            headers: corsHeaders,
+          });
+        } else {
+          return new Response(JSON.stringify({ error: "Parse failed", details: lastError }), {
+            status: 500,
+            headers: corsHeaders,
+          });
+        }
       }
     }
 
