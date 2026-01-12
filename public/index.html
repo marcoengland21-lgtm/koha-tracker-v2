@@ -606,19 +606,17 @@ Respond with ONLY valid JSON:
         }
       }, [syncBinId]);
 
-      // Sync to cloud when page closes/hides (saves battery and API calls)
+      // Sync to cloud when page closes/hides
       useEffect(() => {
         if (!syncBinId) return;
         
         const handleSync = () => {
           if (syncBinId && !syncing) {
-            // Use sendBeacon for reliable sync on page close
             const data = JSON.stringify({ gifts, expenses, transfers });
             navigator.sendBeacon?.(`/api/sync?id=${syncBinId}`, new Blob([data], { type: 'application/json' }));
           }
         };
         
-        // Sync when page becomes hidden (user switches tabs/apps) or closes
         const handleVisibilityChange = () => {
           if (document.visibilityState === 'hidden') {
             handleSync();
@@ -633,6 +631,43 @@ Respond with ONLY valid JSON:
           window.removeEventListener('beforeunload', handleSync);
         };
       }, [syncBinId, gifts, expenses, transfers, syncing]);
+
+      // Instant sync to cloud after any data change (debounced 1 second)
+      const syncTimeout = useRef(null);
+      const dataInitialized = useRef(false);
+      useEffect(() => {
+        if (!syncBinId) return;
+        
+        if (!dataInitialized.current) {
+          dataInitialized.current = true;
+          return;
+        }
+        
+        if (syncTimeout.current) clearTimeout(syncTimeout.current);
+        
+        syncTimeout.current = setTimeout(() => {
+          console.log('Auto-syncing after data change...');
+          syncToCloud();
+        }, 1000);
+        
+        return () => {
+          if (syncTimeout.current) clearTimeout(syncTimeout.current);
+        };
+      }, [gifts, expenses, transfers, syncBinId]);
+
+      // Poll for other users' changes every 10 seconds
+      useEffect(() => {
+        if (!syncBinId) return;
+        
+        const pollInterval = setInterval(() => {
+          if (!syncing) {
+            console.log('Polling for updates...');
+            syncFromCloud();
+          }
+        }, 10000);
+        
+        return () => clearInterval(pollInterval);
+      }, [syncBinId, syncing]);
 
       // Validate new expenses automatically
       useEffect(() => {
