@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" href="icon-180.png">
   <link rel="manifest" href="manifest.json">
   <title>Meaalofa • Koha Tracker</title>
-  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+  <!-- Google Cloud Vision API used for OCR (server-side) -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -992,32 +992,39 @@ Respond with ONLY valid JSON:
       };
 
       // Receipt scanning with Tesseract.js (runs in browser, no API needed)
+      // Receipt scanning with Google Cloud Vision API (much more accurate than Tesseract)
       const scanReceipt = async (imageData, onProgress) => {
-        apiLog('=== scanReceipt called (Tesseract.js) ===');
+        apiLog('=== scanReceipt called (Google Cloud Vision) ===');
         apiLog('Image data length: ' + (imageData?.length || 0) + ' chars (' + Math.round(imageData?.length / 1024) + 'KB)');
         setScanning(true);
         setScanResult(null);
         
         try {
-          apiLog('Starting Tesseract OCR...');
+          // Progress simulation for UI feedback
+          if (onProgress) onProgress(10);
+          apiLog('Sending to Google Cloud Vision...');
           
-          // Create image URL from base64
-          const imageUrl = 'data:image/jpeg;base64,' + imageData;
-          
-          // Run Tesseract OCR
-          const result = await Tesseract.recognize(imageUrl, 'eng', {
-            logger: m => {
-              if (m.status === 'recognizing text') {
-                const progress = Math.round(m.progress * 100);
-                apiLog('OCR progress: ' + progress + '%');
-                if (onProgress) onProgress(progress);
-              }
-            }
+          // Call our server-side Vision API function
+          const response = await fetch('/api/vision', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: imageData })
           });
           
-          const text = result.data.text;
+          if (onProgress) onProgress(60);
+          
+          const result = await response.json();
+          
+          if (!response.ok || result.error) {
+            apiLog('Vision API error: ' + (result.error || 'Unknown error'));
+            throw new Error(result.error || 'Vision API failed');
+          }
+          
+          if (onProgress) onProgress(80);
+          
+          const text = result.text || '';
           apiLog('OCR complete. Text length: ' + text.length);
-          apiLog('Raw text preview: ' + text.substring(0, 200).replace(/\n/g, ' '));
+          apiLog('Raw text preview: ' + text.substring(0, 300).replace(/\n/g, ' | '));
           
           // Parse the text to extract receipt info
           const parsedData = parseReceiptText(text);
@@ -1026,6 +1033,8 @@ Respond with ONLY valid JSON:
           if (parsedData.gst) apiLog('GST: ' + parsedData.gst);
           if (parsedData.discount) apiLog('Discount: ' + parsedData.discount);
           if (parsedData.paymentMethod) apiLog('Payment: ' + parsedData.paymentMethod);
+          
+          if (onProgress) onProgress(100);
           
           const finalResult = {
             total: parsedData.total,
@@ -3697,7 +3706,7 @@ Respond with ONLY valid JSON:
                         <span className="text-lg">✨</span>
                         <span>Autofill with AI</span>
                       </div>
-                      <p className="text-cyan-200/60 text-xs mt-1">~70-85% accuracy on receipts</p>
+                      <p className="text-cyan-200/60 text-xs mt-1">Powered by Google Cloud Vision</p>
                     </button>
                   )}
                   
